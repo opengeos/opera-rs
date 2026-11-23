@@ -667,8 +667,8 @@ pub(crate) fn tile_grid_for_bbox(bbox: BBox, zoom: u8) -> Result<TileGridBounds>
     let clamp_idx = |v: f64| -> u32 { v.clamp(0.0, f64::from(max_idx)) as u32 };
     let tx0 = clamp_idx((gx0 / TILE_SIZE as f64).floor());
     let ty0 = clamp_idx((gy0 / TILE_SIZE as f64).floor());
-    let tx1 = clamp_idx((gx1 / TILE_SIZE as f64).ceil() - 1.0);
-    let ty1 = clamp_idx((gy1 / TILE_SIZE as f64).ceil() - 1.0);
+    let tx1 = clamp_idx((gx1 / TILE_SIZE as f64).ceil() - 1.0).max(tx0);
+    let ty1 = clamp_idx((gy1 / TILE_SIZE as f64).ceil() - 1.0).max(ty0);
     Ok(TileGridBounds {
         tx0,
         ty0,
@@ -718,7 +718,9 @@ pub fn derive_flood_extent(opts: &FloodExtentOptions) -> Result<FloodExtentResul
             bbox: Some(opts.bbox),
             start: Some(opts.start.clone()),
             end: Some(opts.end.clone()),
-            limit: max_granules,
+            // Fetch extra candidates before version deduplication so reprocessed versions
+            // do not starve the target granule budget.
+            limit: (max_granules * 3).min(500),
             deduplicate_versions: true,
             newest_per_tile: false,
             cmr_endpoint: opts.cmr_endpoint.clone(),
