@@ -166,3 +166,94 @@ def test_bundled_cli_and_mcp_server_via_python_module(tmp_path: Path) -> None:
     assert reply["result"]["isError"] is False
     payload = json.loads(reply["result"]["content"][0]["text"])
     assert len(payload["products"]) == 9
+
+
+def test_opera_utils_bursts_frames_missing_data_and_disp(tmp_path: Path) -> None:
+    assert opera_rs.normalize_burst_id("T087-185683-IW2") == "t087_185683_iw2"
+    cslc = (
+        "OPERA_L2_CSLC-S1_T087-185683-IW2_"
+        "20230322T161649Z_20240504T185235Z_S1A_VV_v1.1.h5"
+    )
+    assert opera_rs.get_burst_id(cslc) == "t087_185683_iw2"
+    assert opera_rs.get_dates(cslc) == ["2023-03-22", "2024-05-04"]
+
+    files = [
+        "OPERA_L2_CSLC-S1_T087-185683-IW1_20230101T161649Z_20240504T185235Z_S1A_VV_v1.1.h5",
+        "OPERA_L2_CSLC-S1_T087-185683-IW1_20230113T161649Z_20240504T185235Z_S1A_VV_v1.1.h5",
+        "OPERA_L2_CSLC-S1_T087-185683-IW2_20230101T161649Z_20240504T185235Z_S1A_VV_v1.1.h5",
+    ]
+    grouped = opera_rs.group_by_burst(files)
+    assert set(grouped.keys()) == {"t087_185683_iw1", "t087_185683_iw2"}
+
+    options = opera_rs.get_missing_data_options(files)
+    assert options[0]["total_num_bursts"] == 2
+    assert options[0]["num_burst_ids"] == 2
+    assert options[0]["dates"] == ["2023-01-01"]
+
+    disp = opera_rs.parse_disp_filename(
+        "OPERA_L3_DISP-S1_IW_F11116_VV_20160705T140755Z_20160729T140756Z_v1.0_20241219T231545Z.nc"
+    )
+    assert disp["frame_id"] == 11116
+    assert disp["polarization"] == "VV"
+    assert disp["reference_datetime"] == "2016-07-05T14:07:55Z"
+
+    f2b = tmp_path / "frame-to-burst.json"
+    f2b.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "11114": {
+                        "epsg": 32610,
+                        "is_land": True,
+                        "is_north_america": True,
+                        "xmin": 546450,
+                        "ymin": 4204110,
+                        "xmax": 833790,
+                        "ymax": 4409070,
+                        "burst_ids": ["t042_088905_iw1", "t042_088905_iw2"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    mapping = opera_rs.get_frame_to_burst_mapping(11114, json_file=f2b)
+    assert mapping["epsg"] == 32610
+    assert opera_rs.get_burst_ids_for_frame(11114, json_file=f2b) == [
+        "t042_088905_iw1",
+        "t042_088905_iw2",
+    ]
+    bbox_ll = opera_rs.get_frame_bbox(11114, latlon=True, json_file=f2b)
+    assert bbox_ll["epsg"] == 4326
+
+    geoms = tmp_path / "frames.geojson"
+    geoms.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": 11114,
+                        "properties": {"orbit_pass": "DESCENDING"},
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [
+                                [
+                                    [-122.5, 37.9],
+                                    [-119.1, 37.9],
+                                    [-119.1, 39.8],
+                                    [-122.5, 39.8],
+                                    [-122.5, 37.9],
+                                ]
+                            ],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    hits = opera_rs.get_intersecting_frames([-121.0, 38.0, -120.0, 39.0], json_file=geoms)
+    assert len(hits["features"]) == 1
+    assert hits["features"][0]["id"] == 11114

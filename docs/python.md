@@ -32,6 +32,20 @@ To run all examples interactively without installing anything locally, open the 
 | `opera_rs.read_aoi_bbox(path)` | Read a GeoJSON, GeoPackage, or Shapefile AOI and return its WGS 84 bbox |
 | `opera_rs.write_vector(feature_collection, out_path, ...)` | Write a GeoJSON `FeatureCollection` to `.geojson`, `.gpkg`, or `.shp` |
 | `opera_rs.inspect_raster(path, ...)` | Inspect a local OPERA GeoTIFF/COG on disk via `terrio` |
+| `opera_rs.normalize_burst_id(burst_id)` | Normalize a Sentinel-1 burst ID (`"T087-185683-IW2"` -> `"t087_185683_iw2"`) |
+| `opera_rs.get_burst_id(filename)` | Extract normalized Sentinel-1 burst ID from a filename, UR, or URL |
+| `opera_rs.group_by_burst(files)` | Group CSLC filenames or URLs by normalized burst ID |
+| `opera_rs.get_dates(filename)` | Extract `YYYY-MM-DD` acquisition dates from a filename stem |
+| `opera_rs.parse_disp_filename(filename)` | Parse an `OPERA_L3_DISP-S1` filename or URL into structured metadata |
+| `opera_rs.get_frame_to_burst_mapping(frame_id, ...)` | Look up DISP-S1 frame EPSG, UTM/WGS 84 bounds, and burst IDs (`burst_db` v0.9.0) |
+| `opera_rs.get_burst_ids_for_frame(frame_id, ...)` | Return normalized Sentinel-1 burst IDs belonging to a DISP-S1 frame |
+| `opera_rs.get_frame_ids_for_burst(burst_id, ...)` | Return DISP-S1 frame ID(s) containing a burst ID |
+| `opera_rs.get_frame_bbox(frame_id, latlon=...)` | Return frame EPSG and `[xmin, ymin, xmax, ymax]` (UTM or WGS 84) |
+| `opera_rs.get_frame_geojson(frame_ids=...)` | Return DISP-S1 frame geometries as a GeoJSON `FeatureCollection` |
+| `opera_rs.get_burst_id_geojson(burst_ids=...)` | Return Sentinel-1 burst geometries as a GeoJSON `FeatureCollection` |
+| `opera_rs.get_intersecting_frames(bbox, ...)` | Return DISP-S1 frames intersecting a WGS 84 bounding box |
+| `opera_rs.get_missing_data_options(slc_files)` | Rank optimal rectangular `(burst_ids x dates)` CSLC subsets |
+| `opera_rs.disp_search(frame_id=..., ...)` | Search public NASA CMR for `OPERA_L3_DISP-S1_V1` frame products |
 
 ## End-to-End Example
 

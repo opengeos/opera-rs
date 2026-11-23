@@ -337,15 +337,168 @@ def inspect_raster(
     return json.loads(_opera_rs.inspect_raster_json(str(path), product, band))
 
 
+def normalize_burst_id(burst_id: str) -> str:
+    """Normalize a Sentinel-1 burst ID to lowercase underscores (e.g. ``'t087_185683_iw2'``)."""
+    return str(_opera_rs.normalize_burst_id_py(burst_id))
+
+
+def get_burst_id(filename: str | Path) -> str:
+    """Extract the normalized Sentinel-1 burst ID from a filename, granule UR, or URL."""
+    return str(_opera_rs.get_burst_id_py(str(filename)))
+
+
+def group_by_burst(files: list[str | Path]) -> dict[str, list[str]]:
+    """Group Sentinel-1 CSLC filenames or URLs by normalized burst ID."""
+    return json.loads(_opera_rs.group_by_burst_json([str(f) for f in files]))
+
+
+def get_dates(filename: str | Path) -> list[str]:
+    """Extract ``YYYY-MM-DD`` acquisition dates from a filename stem."""
+    return list(_opera_rs.get_dates_py(str(filename)))
+
+
+def parse_disp_filename(filename: str | Path) -> dict[str, Any]:
+    """Parse an ``OPERA_L3_DISP-S1`` filename or URL into structured metadata."""
+    return json.loads(_opera_rs.parse_disp_filename_json(str(filename)))
+
+
+def get_frame_to_burst_mapping(
+    frame_id: int,
+    *,
+    json_file: str | Path | None = None,
+) -> dict[str, Any]:
+    """Look up DISP-S1 frame metadata (EPSG, UTM/WGS 84 bounds, burst IDs) from ``burst_db``."""
+    path_str = str(json_file) if json_file is not None else None
+    return json.loads(_opera_rs.frame_to_burst_mapping_json(int(frame_id), path_str))
+
+
+def get_burst_ids_for_frame(
+    frame_id: int,
+    *,
+    json_file: str | Path | None = None,
+) -> list[str]:
+    """Return normalized Sentinel-1 burst IDs belonging to a DISP-S1 frame."""
+    path_str = str(json_file) if json_file is not None else None
+    return list(_opera_rs.burst_ids_for_frame_py(int(frame_id), path_str))
+
+
+def get_frame_ids_for_burst(
+    burst_id: str,
+    *,
+    json_file: str | Path | None = None,
+) -> list[int]:
+    """Return DISP-S1 frame ID(s) containing a Sentinel-1 burst ID."""
+    path_str = str(json_file) if json_file is not None else None
+    return list(_opera_rs.frame_ids_for_burst_py(burst_id, path_str))
+
+
+def get_frame_bbox(
+    frame_id: int,
+    *,
+    latlon: bool = False,
+    json_file: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return ``{'frame_id', 'epsg', 'bbox'}`` for a DISP-S1 frame (UTM or WGS 84)."""
+    path_str = str(json_file) if json_file is not None else None
+    return json.loads(_opera_rs.frame_bbox_json(int(frame_id), bool(latlon), path_str))
+
+
+def get_frame_geojson(
+    frame_ids: list[int] | None = None,
+    *,
+    json_file: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return a GeoJSON FeatureCollection of DISP-S1 frame geometries."""
+    path_str = str(json_file) if json_file is not None else None
+    ids = [int(i) for i in frame_ids] if frame_ids is not None else None
+    return json.loads(_opera_rs.frame_geojson_json(ids, path_str))
+
+
+def get_burst_id_geojson(
+    burst_ids: list[str] | None = None,
+    *,
+    json_file: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return a GeoJSON FeatureCollection of Sentinel-1 burst geometries."""
+    path_str = str(json_file) if json_file is not None else None
+    return json.loads(_opera_rs.burst_id_geojson_json(burst_ids, path_str))
+
+
+def get_intersecting_frames(
+    bbox: BBoxLike,
+    *,
+    json_file: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return a GeoJSON FeatureCollection of DISP-S1 frames intersecting ``bbox``."""
+    b = _require_bbox(bbox)
+    path_str = str(json_file) if json_file is not None else None
+    return json.loads(_opera_rs.intersecting_frames_json(b, path_str))
+
+
+def get_missing_data_options(slc_files: list[str | Path]) -> list[dict[str, Any]]:
+    """Compute ranked optimal Sentinel-1 burst/date subsets for missing CSLC data."""
+    return json.loads(_opera_rs.missing_data_options_json([str(f) for f in slc_files]))
+
+
+def disp_search(
+    *,
+    frame_id: int | None = None,
+    bbox: BBoxLike | None = None,
+    place: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    product_version: str | None = "1.0",
+    url_type: str = "https",
+    deduplicate: bool = True,
+    limit: int = 500,
+    cmr_endpoint: str | None = None,
+    nominatim_endpoint: str | None = None,
+) -> dict[str, Any]:
+    """Search public NASA CMR for ``OPERA_L3_DISP-S1_V1`` products by frame ID or AOI."""
+    if bbox is not None and place is not None:
+        raise ValueError("specify either bbox or place, not both")
+    resolved_bbox = _bbox_tuple(bbox)
+    if resolved_bbox is None and place is not None:
+        geo = geocode(place, endpoint=nominatim_endpoint)["bbox"]
+        resolved_bbox = (geo["west"], geo["south"], geo["east"], geo["north"])
+    return json.loads(
+        _opera_rs.disp_search_json(
+            int(frame_id) if frame_id is not None else None,
+            resolved_bbox,
+            product_version,
+            start,
+            end,
+            url_type,
+            deduplicate,
+            limit,
+            cmr_endpoint,
+        )
+    )
+
+
 __all__ = [
     "__version__",
     "analyze_time_series",
     "derive_flood_extent",
     "detect_change",
+    "disp_search",
     "expression_presets",
     "find_product",
     "geocode",
+    "get_burst_id",
+    "get_burst_id_geojson",
+    "get_burst_ids_for_frame",
+    "get_dates",
+    "get_frame_bbox",
+    "get_frame_geojson",
+    "get_frame_ids_for_burst",
+    "get_frame_to_burst_mapping",
+    "get_intersecting_frames",
+    "get_missing_data_options",
+    "group_by_burst",
     "inspect_raster",
+    "normalize_burst_id",
+    "parse_disp_filename",
     "point",
     "preview",
     "products",

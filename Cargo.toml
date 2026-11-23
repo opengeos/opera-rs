@@ -14,6 +14,7 @@ authors = ["Qiusheng Wu <giswqs@gmail.com>"]
 [workspace.dependencies]
 opera-rs = { path = "crates/opera-rs", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 gif = "0.14"
 png = "0.17"
 rayon = "1.10"

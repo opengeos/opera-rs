@@ -10,12 +10,16 @@
 //! - `parallel` (default): Multi-threaded tile fetching and raster rendering via `rayon`.
 
 pub mod analysis;
+pub mod burst_db;
+pub mod bursts;
 pub mod cmr;
+pub mod disp;
 pub mod error;
 pub mod flood_extent;
 #[cfg(feature = "geo")]
 pub mod geo_io;
 pub mod geocode;
+pub mod missing_data;
 pub mod products;
 pub mod titiler;
 pub mod types;
@@ -26,9 +30,26 @@ pub use analysis::{
     ObservationSummary, SeriesTrend, TimeSeriesOptions, TimeSeriesResult, analyze_time_series,
     detect_change, fetch_time_series_candidates,
 };
+pub use burst_db::{
+    BURST_DB_BASE_URL, BURST_DB_VERSION, BurstDbAsset, FrameBBox, FrameInfo, OrbitPass,
+    default_cache_dir, fetch_burst_db_file, frame_ids_from_geojson, get_burst_id_geojson,
+    get_burst_ids_for_frame, get_frame_bbox, get_frame_geojson, get_frame_ids_for_burst,
+    get_frame_orbit_pass, get_frame_to_burst_mapping, get_intersecting_frames,
+    get_intersecting_frames_for_point, read_zipped_json,
+};
+pub use bursts::{
+    ParsedBurstId, ParsedCslcFilename, filter_by_burst_id, filter_by_date, get_burst_id, get_dates,
+    get_datetimes, group_by_burst, group_by_date, normalize_burst_id, parse_burst_id,
+    parse_cslc_filename, sort_by_burst_id, sort_files_by_date,
+};
 pub use cmr::{
     CmrSearchParams, GranuleSearchResult, OperaGranule, ResolvedAoiLayer, resolve_aoi_layer,
     resolve_concept_id, search_granules,
+};
+pub use disp::{
+    CorrectionDataset, DISP_S1_SHORT_NAME, DispProduct, DispProductStack, DispSearchParams,
+    DispSearchResult, DisplacementDataset, QualityDataset, ReferenceMethod, UrlType,
+    deduplicate_disp_products, search_disp_products,
 };
 pub use error::{OperaError, Result};
 pub use flood_extent::{FloodExtentOptions, FloodExtentResult, derive_flood_extent};
@@ -38,6 +59,10 @@ pub use geo_io::{
     write_feature_collection,
 };
 pub use geocode::{DEFAULT_NOMINATIM_ENDPOINT, GeocodedPlace, geocode_place};
+pub use missing_data::{
+    BurstSubsetOption, generate_burst_subset_options, get_burst_id_date_incidence,
+    get_burst_id_to_dates, get_missing_data_options, get_missing_data_options_from_pairs,
+};
 pub use products::{
     DIST_STATUS_COLORMAP_JSON, DSWX_OPEN_WATER_CLASS, DSWX_PARTIAL_WATER_CLASS,
     DSWX_WTR_COLORMAP_JSON, DSWX_WTR_WATER_ONLY_COLORMAP_JSON, ExpressionPreset, LayerStyle,
