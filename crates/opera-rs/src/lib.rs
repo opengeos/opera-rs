@@ -51,8 +51,9 @@ pub use titiler::{
 pub use types::{BBox, CalendarDate, TitilerBackend};
 pub use viz::{
     CARTO_POSITRON_TEMPLATE, CARTO_VOYAGER_TEMPLATE, HtmlTileLayer, PreviewOptions,
-    build_interactive_html, combine_side_by_side, encode_animated_gif, encode_png_rgba,
-    export_interactive_html, render_preview_png,
+    build_html_tile_layers, build_interactive_html, combine_side_by_side, encode_animated_gif,
+    encode_png_rgba, export_interactive_html, render_animation_gif, render_change_comparison_png,
+    render_preview_png,
 };
 
 /// Package version string.

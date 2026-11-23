@@ -8,13 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{OperaError, Result};
-use crate::flood_extent::RgbaImage;
+use crate::flood_extent::{RgbaImage, TILE_SIZE};
 #[cfg(feature = "http")]
-use crate::flood_extent::{TILE_SIZE, choose_zoom, decode_png_rgba, tile_grid_for_bbox};
+use crate::flood_extent::{choose_zoom, decode_png_rgba, tile_grid_for_bbox};
 use crate::products::{LayerStyle, legend_entries};
-use crate::titiler::TitilerQuery;
-#[cfg(feature = "http")]
-use crate::titiler::build_tile_url_template;
+use crate::titiler::{TitilerQuery, build_tile_url_template};
 use crate::types::BBox;
 
 /// Public CARTO Positron XYZ basemap template (no API key required).
@@ -468,6 +466,169 @@ pub fn combine_side_by_side(left: &RgbaImage, right: &RgbaImage) -> RgbaImage {
     composite_over(&mut out, left, 0, 0);
     composite_over(&mut out, right, left.width + gap, 0);
     out
+}
+
+/// Renders a side-by-side Before | After comparison PNG for a [`crate::analysis::ChangeDetectionResult`].
+#[cfg(feature = "http")]
+pub fn render_change_comparison_png(
+    res: &crate::analysis::ChangeDetectionResult,
+    bbox: BBox,
+    endpoint: &str,
+    expression: Option<&str>,
+) -> Result<Vec<u8>> {
+    let style = LayerStyle::for_band(&res.product, Some(&res.band), true, None, None);
+    let b_query = TitilerQuery::for_granule_band(
+        endpoint,
+        &res.concept_id,
+        &res.product,
+        &res.before.granule_id,
+        &res.band,
+        expression.map(ToString::to_string),
+        Some(&style),
+    );
+    let a_query = TitilerQuery::for_granule_band(
+        endpoint,
+        &res.concept_id,
+        &res.product,
+        &res.after.granule_id,
+        &res.band,
+        expression.map(ToString::to_string),
+        Some(&style),
+    );
+    let b_tpl = build_tile_url_template(&b_query, TILE_SIZE as u32);
+    let a_tpl = build_tile_url_template(&a_query, TILE_SIZE as u32);
+    let mut left = stitch_tile_templates(bbox, &[b_tpl], 3, 512, true)?;
+    let mut right = stitch_tile_templates(bbox, &[a_tpl], 3, 512, true)?;
+    decorate_preview(
+        &mut left,
+        &PreviewOptions {
+            title: Some(format!("BEFORE {}", res.before.acquired_date)),
+            water_only: true,
+            legend: false,
+            ..PreviewOptions::new(bbox, &res.product, Some(res.band.clone()))
+        },
+    );
+    decorate_preview(
+        &mut right,
+        &PreviewOptions {
+            title: Some(format!("AFTER {}", res.after.acquired_date)),
+            water_only: true,
+            scale_bar: false,
+            ..PreviewOptions::new(bbox, &res.product, Some(res.band.clone()))
+        },
+    );
+    let combined = combine_side_by_side(&left, &right);
+    encode_png_rgba(&combined)
+}
+
+#[cfg(not(feature = "http"))]
+pub fn render_change_comparison_png(
+    _res: &crate::analysis::ChangeDetectionResult,
+    _bbox: BBox,
+    _endpoint: &str,
+    _expression: Option<&str>,
+) -> Result<Vec<u8>> {
+    Err(OperaError::HttpDisabled)
+}
+
+/// Renders an animated time-series GIF across chronologically sampled OPERA granules.
+///
+/// Returns `(gif_bytes, frame_dates)`.
+#[cfg(feature = "http")]
+#[allow(clippy::too_many_arguments)]
+pub fn render_animation_gif(
+    bbox: BBox,
+    product: &str,
+    product_short_title: &str,
+    concept_id: &str,
+    granules: &[crate::cmr::OperaGranule],
+    band: &str,
+    water_only: bool,
+    max_dim: usize,
+    basemap: bool,
+    delay_cs: u16,
+    endpoint: &str,
+) -> Result<(Vec<u8>, Vec<String>)> {
+    if granules.is_empty() {
+        return Err(OperaError::NoResults(format!(
+            "no {product} granules available to animate"
+        )));
+    }
+    let style = LayerStyle::for_band(product, Some(band), water_only, None, None);
+    let mut frames = Vec::with_capacity(granules.len());
+    let mut dates = Vec::with_capacity(granules.len());
+    for g in granules {
+        let q = TitilerQuery::for_granule_band(
+            endpoint,
+            concept_id,
+            product,
+            &g.id,
+            band,
+            None,
+            Some(&style),
+        );
+        let tpl = build_tile_url_template(&q, TILE_SIZE as u32);
+        let mut img = stitch_tile_templates(bbox, &[tpl], 3, max_dim, basemap)?;
+        let mut opts = PreviewOptions::new(bbox, product, Some(band.to_string()));
+        opts.water_only = water_only;
+        opts.title = Some(format!("{product_short_title} {}", g.date));
+        decorate_preview(&mut img, &opts);
+        dates.push(g.date.clone());
+        frames.push(img);
+    }
+    let gif_bytes = encode_animated_gif(&frames, delay_cs)?;
+    Ok((gif_bytes, dates))
+}
+
+#[cfg(not(feature = "http"))]
+#[allow(clippy::too_many_arguments)]
+pub fn render_animation_gif(
+    _bbox: BBox,
+    _product: &str,
+    _product_short_title: &str,
+    _concept_id: &str,
+    _granules: &[crate::cmr::OperaGranule],
+    _band: &str,
+    _water_only: bool,
+    _max_dim: usize,
+    _basemap: bool,
+    _delay_cs: u16,
+    _endpoint: &str,
+) -> Result<(Vec<u8>, Vec<String>)> {
+    Err(OperaError::HttpDisabled)
+}
+
+/// Builds interactive MapLibre tile layer descriptors for a list of OPERA granules.
+pub fn build_html_tile_layers(
+    product: &str,
+    product_short_title: &str,
+    concept_id: &str,
+    granules: &[crate::cmr::OperaGranule],
+    band: &str,
+    style: &LayerStyle,
+    endpoint: &str,
+) -> Vec<HtmlTileLayer> {
+    granules
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let q = TitilerQuery::for_granule_band(
+                endpoint,
+                concept_id,
+                product,
+                &g.id,
+                band,
+                None,
+                Some(style),
+            );
+            HtmlTileLayer {
+                id: format!("opera-layer-{i}"),
+                label: format!("{product_short_title} {} ({})", g.date, g.tile),
+                tile_url: build_tile_url_template(&q, TILE_SIZE as u32),
+                opacity: 0.85,
+            }
+        })
+        .collect()
 }
 
 /// Encodes a sequence of equal-sized [`RgbaImage`] frames into an animated GIF byte vector.

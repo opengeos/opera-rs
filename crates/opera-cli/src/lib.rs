@@ -23,8 +23,8 @@ use opera_rs::titiler::{
 };
 use opera_rs::types::{BBox, TitilerBackend};
 use opera_rs::viz::{
-    HtmlTileLayer, PreviewOptions, combine_side_by_side, decorate_preview, encode_animated_gif,
-    encode_png_rgba, export_interactive_html, render_preview_png, stitch_tile_templates,
+    PreviewOptions, build_html_tile_layers, export_interactive_html, render_animation_gif,
+    render_change_comparison_png, render_preview_png,
 };
 use opera_rs::{DEFAULT_TITILER_ENDPOINT, OperaError, Result};
 use serde_json::{Value, json};
@@ -48,6 +48,7 @@ pub struct Cli {
 
 /// Shared AOI selector flags accepted by spatial commands (`--bbox`, `--place`, or `--aoi-file`).
 #[derive(Debug, Clone, Args)]
+#[group(multiple = false)]
 pub struct AoiArgs {
     /// WGS 84 bounding box as 'west,south,east,north'.
     #[arg(long, value_name = "W,S,E,N", allow_hyphen_values = true)]
@@ -87,17 +88,26 @@ impl AoiArgs {
 }
 
 /// Shared `titiler-cmr` endpoint option (defaults to `OPERA_TITILER_ENDPOINT` or OpenGeos endpoint).
-fn resolve_endpoint(explicit: Option<&str>) -> String {
-    explicit
+///
+/// Validates that the resolved URL uses `http://` or `https://`.
+fn resolve_endpoint(explicit: Option<&str>) -> Result<String> {
+    let raw = explicit
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
         .or_else(|| {
             std::env::var("OPERA_TITILER_ENDPOINT")
                 .ok()
-                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
         })
-        .unwrap_or_else(|| DEFAULT_TITILER_ENDPOINT.to_string())
+        .unwrap_or_else(|| DEFAULT_TITILER_ENDPOINT.to_string());
+    if !(raw.starts_with("https://") || raw.starts_with("http://")) {
+        return Err(OperaError::InvalidInput(format!(
+            "titiler endpoint must start with http:// or https://, got '{raw}'"
+        )));
+    }
+    Ok(raw)
 }
 
 #[derive(Debug, Subcommand)]
@@ -441,6 +451,9 @@ pub enum Commands {
         /// Output PNG path (required on CLI; omit in `opera mcp` to receive inline image content).
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Render an animated time-series GIF across OPERA acquisition dates for an AOI.
@@ -552,7 +565,12 @@ where
     run_with_self_command(args, None)
 }
 
-/// Runs the CLI, using `self_cmd` (e.g. `python -m opera_rs`) when `opera mcp` spawns child tools.
+/// Runs the CLI, using `self_cmd` (e.g. `python -P -m opera_rs`) when `opera mcp` spawns child
+/// tools.
+///
+/// The standalone Rust binary passes `None` (re-invoking `std::env::current_exe()`), while the
+/// Python `opera-rs` wheel passes `[sys.executable, "-P", "-m", "opera_rs"]` so MCP tool calls
+/// invoke the bundled extension without needing a separate native binary on `PATH`.
 pub fn run_with_self_command<I, T>(args: I, self_cmd: Option<Vec<OsString>>) -> i32
 where
     I: IntoIterator<Item = T>,
@@ -722,7 +740,11 @@ fn dispatch(command: Commands) -> Result<()> {
             if as_json {
                 let mut v = serde_json::to_value(&res)?;
                 if let Some((p, count)) = written {
+                    // Omit bulky GeoJSON inline when saved to disk so agent context stays compact.
                     v["written_footprints"] = json!({"path": p, "features": count});
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.remove("feature_collection");
+                    }
                 }
                 if let Some((_, Some(place_name))) = resolved_aoi {
                     v["geocoded_place"] = json!(place_name);
@@ -819,7 +841,7 @@ fn dispatch(command: Commands) -> Result<()> {
                 });
 
             let mut query = TitilerQuery::rasterio(&resolved_cid);
-            query.endpoint = resolve_endpoint(endpoint.as_deref());
+            query.endpoint = resolve_endpoint(endpoint.as_deref())?;
             query.backend = backend_parsed;
             query.product = prod_name;
             query.granule_ur = granule;
@@ -828,11 +850,7 @@ fn dispatch(command: Commands) -> Result<()> {
             query.variables = variables;
             query.group = group;
             query.expression = expression;
-            query.colormap = style.colormap;
-            query.colormap_name = style.colormap_name;
-            if let Some(r) = style.rescale {
-                query.rescale = vec![r];
-            }
+            query.apply_style(&style);
 
             let tile_template = build_tile_url_template(&query, 512);
             if url_only {
@@ -900,7 +918,7 @@ fn dispatch(command: Commands) -> Result<()> {
             };
             let chosen_band = band.or_else(|| prod.default_bands.first().cloned());
             let mut query = TitilerQuery::rasterio(&cid);
-            query.endpoint = resolve_endpoint(endpoint.as_deref());
+            query.endpoint = resolve_endpoint(endpoint.as_deref())?;
             query.product = Some(prod.short_name.clone());
             query.granule_ur = granule;
             query.temporal = temporal;
@@ -988,10 +1006,14 @@ fn dispatch(command: Commands) -> Result<()> {
             };
 
             let is_cat = categorical
-                || (expression.is_none()
+                || (expression
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_none()
                     && is_categorical_band(&prod.short_name, Some(&chosen_band)));
             let mut query = TitilerQuery::rasterio(&cid);
-            query.endpoint = resolve_endpoint(endpoint.as_deref());
+            query.endpoint = resolve_endpoint(endpoint.as_deref())?;
             query.product = Some(prod.short_name.clone());
             query.granule_ur = resolved_granule.clone();
             query.assets = vec![chosen_band.clone()];
@@ -1018,12 +1040,13 @@ fn dispatch(command: Commands) -> Result<()> {
                     bbox
                 );
                 for (bname, b) in &stats.bands {
+                    let valid_str = b
+                        .valid_percent
+                        .map(|v| format!("{v:.1}%"))
+                        .unwrap_or_else(|| "n/a".into());
                     println!(
-                        "  {bname}: min={:?} max={:?} mean={:?} valid={:.1}%",
-                        b.min,
-                        b.max,
-                        b.mean,
-                        b.valid_percent.unwrap_or(0.0)
+                        "  {bname}: min={:?} max={:?} mean={:?} valid={valid_str}",
+                        b.min, b.max, b.mean
                     );
                     for cls in &b.class_breakdown {
                         println!(
@@ -1054,7 +1077,7 @@ fn dispatch(command: Commands) -> Result<()> {
             json: as_json,
         } => {
             let (bbox, _) = aoi.resolve_required()?;
-            let ep = resolve_endpoint(endpoint.as_deref());
+            let ep = resolve_endpoint(endpoint.as_deref())?;
             let res = detect_change(&ChangeDetectionOptions {
                 product,
                 bbox,
@@ -1069,45 +1092,7 @@ fn dispatch(command: Commands) -> Result<()> {
             })?;
 
             if let Some(preview_path) = &preview_out {
-                let style = LayerStyle::for_band(&res.product, Some(&res.band), true, None, None);
-                let make_query = |ur: &str| {
-                    let mut q = TitilerQuery::rasterio(&res.concept_id);
-                    q.endpoint = ep.clone();
-                    q.product = Some(res.product.clone());
-                    q.granule_ur = Some(ur.to_string());
-                    q.assets = vec![res.band.clone()];
-                    q.expression = expression.clone();
-                    q.colormap = style.colormap.clone();
-                    q.colormap_name = style.colormap_name.clone();
-                    if let Some(r) = &style.rescale {
-                        q.rescale = vec![r.clone()];
-                    }
-                    q
-                };
-                let b_tpl = build_tile_url_template(&make_query(&res.before.granule_id), 256);
-                let a_tpl = build_tile_url_template(&make_query(&res.after.granule_id), 256);
-                let mut left = stitch_tile_templates(bbox, &[b_tpl], 3, 512, true)?;
-                let mut right = stitch_tile_templates(bbox, &[a_tpl], 3, 512, true)?;
-                decorate_preview(
-                    &mut left,
-                    &PreviewOptions {
-                        title: Some(format!("BEFORE {}", res.before.acquired_date)),
-                        water_only: true,
-                        legend: false,
-                        ..PreviewOptions::new(bbox, &res.product, Some(res.band.clone()))
-                    },
-                );
-                decorate_preview(
-                    &mut right,
-                    &PreviewOptions {
-                        title: Some(format!("AFTER {}", res.after.acquired_date)),
-                        water_only: true,
-                        scale_bar: false,
-                        ..PreviewOptions::new(bbox, &res.product, Some(res.band.clone()))
-                    },
-                );
-                let combined = combine_side_by_side(&left, &right);
-                let bytes = encode_png_rgba(&combined)?;
+                let bytes = render_change_comparison_png(&res, bbox, &ep, expression.as_deref())?;
                 if let Some(parent) = preview_path.parent()
                     && !parent.as_os_str().is_empty()
                 {
@@ -1173,7 +1158,7 @@ fn dispatch(command: Commands) -> Result<()> {
                 max_observations,
                 band,
                 expression,
-                titiler_endpoint: Some(resolve_endpoint(endpoint.as_deref())),
+                titiler_endpoint: Some(resolve_endpoint(endpoint.as_deref())?),
                 cmr_endpoint: None,
             })?;
             if let Some(csv_path) = &csv_out {
@@ -1197,21 +1182,31 @@ fn dispatch(command: Commands) -> Result<()> {
                 );
                 for obs in &res.observations {
                     if let Some(tw) = obs.total_water_km2 {
+                        let open_str = obs
+                            .open_water_km2
+                            .map(|v| format!("{v:.3} km^2"))
+                            .unwrap_or_else(|| "n/a".into());
                         println!(
-                            "  {} | open={:.3} km^2 | total={:.3} km^2 | {}",
-                            obs.acquired_date,
-                            obs.open_water_km2.unwrap_or(0.0),
-                            tw,
-                            obs.granule_id
+                            "  {} | open={open_str} | total={tw:.3} km^2 | {}",
+                            obs.acquired_date, obs.granule_id
                         );
                     } else {
+                        let mean_str = obs
+                            .stats
+                            .mean
+                            .map(|v| format!("{v:.4}"))
+                            .unwrap_or_else(|| "n/a".into());
                         println!(
-                            "  {} | mean={:.4} | {}",
-                            obs.acquired_date,
-                            obs.stats.mean.unwrap_or(f64::NAN),
-                            obs.granule_id
+                            "  {} | mean={mean_str} | {}",
+                            obs.acquired_date, obs.granule_id
                         );
                     }
+                }
+                if !res.failed_observations.is_empty() {
+                    println!(
+                        "  Note: {} sampled observation(s) failed statistics retrieval.",
+                        res.failed_observations.len()
+                    );
                 }
                 if let Some(tr) = &res.trend {
                     println!(
@@ -1243,7 +1238,7 @@ fn dispatch(command: Commands) -> Result<()> {
             opts.max_granules_per_product = max_granules;
             opts.max_tiles_across = max_tiles_across;
             opts.min_area_km2 = min_area_km2;
-            opts.titiler_endpoint = Some(resolve_endpoint(endpoint.as_deref()));
+            opts.titiler_endpoint = Some(resolve_endpoint(endpoint.as_deref())?);
 
             let res = derive_flood_extent(&opts)?;
             if let Some(out_path) = &output {
@@ -1254,7 +1249,9 @@ fn dispatch(command: Commands) -> Result<()> {
                 if let Some(out_path) = &output {
                     // Omit bulky GeoJSON inline when saved to disk so agent context stays compact.
                     val["output_path"] = json!(out_path.display().to_string());
-                    val.as_object_mut().unwrap().remove("feature_collection");
+                    if let Some(obj) = val.as_object_mut() {
+                        obj.remove("feature_collection");
+                    }
                 }
                 print_json(&val)?;
             } else {
@@ -1262,6 +1259,12 @@ fn dispatch(command: Commands) -> Result<()> {
                     "Derived {} observed water polygon(s) totaling {:.3} km^2 (zoom {})",
                     res.polygon_count, res.total_area_km2, res.zoom
                 );
+                if res.failed_tiles > 0 {
+                    println!(
+                        "Warning: {} tile request(s) failed; flood coverage may be incomplete.",
+                        res.failed_tiles
+                    );
+                }
                 println!("Provenance: {}", res.provenance);
                 if let Some(out_path) = &output {
                     println!("Saved flood extent to {}", out_path.display());
@@ -1290,10 +1293,11 @@ fn dispatch(command: Commands) -> Result<()> {
             title,
             endpoint,
             output,
+            json: as_json,
         } => {
             let prod = find_product(&product)?;
             let (bbox, place_name) = aoi.resolve_required()?;
-            let ep = resolve_endpoint(endpoint.as_deref());
+            let ep = resolve_endpoint(endpoint.as_deref())?;
 
             let (cid, chosen_granules, chosen_band, date_label) = if !granules.is_empty() {
                 let cid = resolve_concept_id(&prod.short_name, None)?;
@@ -1312,19 +1316,19 @@ fn dispatch(command: Commands) -> Result<()> {
                     newest_per_tile: true,
                     cmr_endpoint: None,
                 })?;
-                if search.granules.is_empty() {
-                    return Err(OperaError::NoResults(format!(
+                let first = search.granules.first().ok_or_else(|| {
+                    OperaError::NoResults(format!(
                         "no {} granules found over {}",
                         prod.short_name, bbox
-                    )));
-                }
+                    ))
+                })?;
                 let cid = search
                     .concept_id
                     .clone()
-                    .or_else(|| search.granules[0].concept_id.clone())
+                    .or_else(|| first.concept_id.clone())
                     .ok_or_else(|| OperaError::NoResults("missing concept_id".into()))?;
                 let b = band
-                    .or_else(|| prod.choose_band(&search.granules[0].bands))
+                    .or_else(|| prod.choose_band(&first.bands))
                     .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
                 let latest_date = search.dates.first().cloned();
                 let urs: Vec<String> = search
@@ -1346,28 +1350,24 @@ fn dispatch(command: Commands) -> Result<()> {
             let queries: Vec<TitilerQuery> = chosen_granules
                 .iter()
                 .map(|ur| {
-                    let mut q = TitilerQuery::rasterio(&cid);
-                    q.endpoint = ep.clone();
-                    q.product = Some(prod.short_name.clone());
-                    q.granule_ur = Some(ur.clone());
-                    q.assets = vec![chosen_band.clone()];
-                    q.expression = expression.clone();
-                    q.colormap = style.colormap.clone();
-                    q.colormap_name = style.colormap_name.clone();
-                    if let Some(r) = &style.rescale {
-                        q.rescale = vec![r.clone()];
-                    }
-                    q
+                    TitilerQuery::for_granule_band(
+                        &ep,
+                        &cid,
+                        &prod.short_name,
+                        ur,
+                        &chosen_band,
+                        expression.clone(),
+                        Some(&style),
+                    )
                 })
                 .collect();
 
             let banner = title.or_else(|| {
-                Some(format!(
-                    "{} {} {}",
-                    prod.short_title,
-                    chosen_band,
-                    date_label.as_deref().unwrap_or("")
-                ))
+                let base = format!("{} {}", prod.short_title, chosen_band);
+                Some(match date_label.as_deref().filter(|d| !d.is_empty()) {
+                    Some(d) => format!("{base} {d}"),
+                    None => base,
+                })
             });
             let mut opts = PreviewOptions::new(bbox, &prod.short_name, Some(chosen_band.clone()));
             opts.water_only = water_only;
@@ -1385,18 +1385,31 @@ fn dispatch(command: Commands) -> Result<()> {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&output, &png_bytes)?;
-            println!(
-                "Rendered {} ({}, {} granule(s){}) preview ({} bytes) to {}",
-                prod.short_name,
-                chosen_band,
-                chosen_granules.len(),
-                place_name
-                    .as_deref()
-                    .map(|p| format!(", {p}"))
-                    .unwrap_or_default(),
-                png_bytes.len(),
-                output.display()
-            );
+            if as_json {
+                print_json(&json!({
+                    "product": prod.short_name,
+                    "band": chosen_band,
+                    "granules": chosen_granules,
+                    "granule_count": chosen_granules.len(),
+                    "bbox": bbox,
+                    "geocoded_place": place_name,
+                    "bytes": png_bytes.len(),
+                    "output": output.display().to_string(),
+                }))?;
+            } else {
+                println!(
+                    "Rendered {} ({}, {} granule(s){}) preview ({} bytes) to {}",
+                    prod.short_name,
+                    chosen_band,
+                    chosen_granules.len(),
+                    place_name
+                        .as_deref()
+                        .map(|p| format!(", {p}"))
+                        .unwrap_or_default(),
+                    png_bytes.len(),
+                    output.display()
+                );
+            }
             Ok(())
         }
 
@@ -1418,7 +1431,7 @@ fn dispatch(command: Commands) -> Result<()> {
         } => {
             let prod = find_product(&product)?;
             let (bbox, _) = aoi.resolve_required()?;
-            let ep = resolve_endpoint(endpoint.as_deref());
+            let ep = resolve_endpoint(endpoint.as_deref())?;
             let search = search_granules(&CmrSearchParams {
                 product: prod.short_name.clone(),
                 bbox: Some(bbox),
@@ -1444,37 +1457,29 @@ fn dispatch(command: Commands) -> Result<()> {
                 interval_days,
                 max_frames.clamp(1, 30),
             );
+            let first = sampled.first().ok_or_else(|| {
+                OperaError::NoResults(format!(
+                    "no dated {} granules available to animate",
+                    prod.short_name
+                ))
+            })?;
             let chosen_band = band
-                .or_else(|| prod.choose_band(&sampled[0].bands))
+                .or_else(|| prod.choose_band(&first.bands))
                 .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
-            let style =
-                LayerStyle::for_band(&prod.short_name, Some(&chosen_band), water_only, None, None);
 
-            let mut frames = Vec::with_capacity(sampled.len());
-            let mut dates = Vec::with_capacity(sampled.len());
-            for g in &sampled {
-                let mut q = TitilerQuery::rasterio(&cid);
-                q.endpoint = ep.clone();
-                q.product = Some(prod.short_name.clone());
-                q.granule_ur = Some(g.id.clone());
-                q.assets = vec![chosen_band.clone()];
-                q.colormap = style.colormap.clone();
-                q.colormap_name = style.colormap_name.clone();
-                if let Some(r) = &style.rescale {
-                    q.rescale = vec![r.clone()];
-                }
-                let tpl = build_tile_url_template(&q, 256);
-                let mut img = stitch_tile_templates(bbox, &[tpl], 3, max_dim, !no_basemap)?;
-                let mut opts =
-                    PreviewOptions::new(bbox, &prod.short_name, Some(chosen_band.clone()));
-                opts.water_only = water_only;
-                opts.title = Some(format!("{} {}", prod.short_title, g.date));
-                decorate_preview(&mut img, &opts);
-                dates.push(g.date.clone());
-                frames.push(img);
-            }
-
-            let gif_bytes = encode_animated_gif(&frames, delay_cs)?;
+            let (gif_bytes, dates) = render_animation_gif(
+                bbox,
+                &prod.short_name,
+                &prod.short_title,
+                &cid,
+                &sampled,
+                &chosen_band,
+                water_only,
+                max_dim,
+                !no_basemap,
+                delay_cs,
+                &ep,
+            )?;
             if let Some(parent) = output.parent()
                 && !parent.as_os_str().is_empty()
             {
@@ -1485,7 +1490,7 @@ fn dispatch(command: Commands) -> Result<()> {
                 print_json(&json!({
                     "product": prod.short_name,
                     "band": chosen_band,
-                    "frames": frames.len(),
+                    "frames": dates.len(),
                     "dates": dates,
                     "bytes": gif_bytes.len(),
                     "output": output.display().to_string(),
@@ -1493,7 +1498,7 @@ fn dispatch(command: Commands) -> Result<()> {
             } else {
                 println!(
                     "Wrote {}-frame animated GIF ({} bytes) to {}",
-                    frames.len(),
+                    dates.len(),
                     gif_bytes.len(),
                     output.display()
                 );
@@ -1516,7 +1521,7 @@ fn dispatch(command: Commands) -> Result<()> {
         } => {
             let prod = find_product(&product)?;
             let (bbox, place_name) = aoi.resolve_required()?;
-            let ep = resolve_endpoint(endpoint.as_deref());
+            let ep = resolve_endpoint(endpoint.as_deref())?;
             let search = search_granules(&CmrSearchParams {
                 product: prod.short_name.clone(),
                 bbox: Some(bbox),
@@ -1527,46 +1532,38 @@ fn dispatch(command: Commands) -> Result<()> {
                 newest_per_tile: true,
                 cmr_endpoint: None,
             })?;
-            if search.granules.is_empty() {
-                return Err(OperaError::NoResults(format!(
+            let first = search.granules.first().ok_or_else(|| {
+                OperaError::NoResults(format!(
                     "no {} granules found over {}",
                     prod.short_name, bbox
-                )));
-            }
+                ))
+            })?;
             let cid = search
                 .concept_id
                 .clone()
+                .or_else(|| first.concept_id.clone())
                 .ok_or_else(|| OperaError::NoResults("missing concept_id".into()))?;
             let chosen_band = band
-                .or_else(|| prod.choose_band(&search.granules[0].bands))
+                .or_else(|| prod.choose_band(&first.bands))
                 .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
             let style =
                 LayerStyle::for_band(&prod.short_name, Some(&chosen_band), water_only, None, None);
 
-            let layers: Vec<HtmlTileLayer> = search
+            let selected_granules: Vec<_> = search
                 .granules
                 .iter()
                 .take(max_granules.clamp(1, 15))
-                .enumerate()
-                .map(|(i, g)| {
-                    let mut q = TitilerQuery::rasterio(&cid);
-                    q.endpoint = ep.clone();
-                    q.product = Some(prod.short_name.clone());
-                    q.granule_ur = Some(g.id.clone());
-                    q.assets = vec![chosen_band.clone()];
-                    q.colormap = style.colormap.clone();
-                    q.colormap_name = style.colormap_name.clone();
-                    if let Some(r) = &style.rescale {
-                        q.rescale = vec![r.clone()];
-                    }
-                    HtmlTileLayer {
-                        id: format!("opera-layer-{i}"),
-                        label: format!("{} {} ({})", prod.short_title, g.date, g.tile),
-                        tile_url: build_tile_url_template(&q, 256),
-                        opacity: 0.85,
-                    }
-                })
+                .cloned()
                 .collect();
+            let layers = build_html_tile_layers(
+                &prod.short_name,
+                &prod.short_title,
+                &cid,
+                &selected_granules,
+                &chosen_band,
+                &style,
+                &ep,
+            );
 
             let page_title = title.unwrap_or_else(|| {
                 format!(
@@ -1691,5 +1688,37 @@ mod tests {
         ])
         .expect("parse negative western-hemisphere bbox");
         assert!(matches!(parsed.command, Some(Commands::Search { .. })));
+    }
+
+    #[test]
+    fn rejects_conflicting_aoi_flags_and_invalid_endpoints() {
+        let conflict = Cli::try_parse_from([
+            "opera",
+            "search",
+            "--bbox",
+            "-119.95,35.85,-119.45,36.25",
+            "--place",
+            "Tulare Lake",
+        ]);
+        assert!(conflict.is_err(), "conflicting AOI flags should fail");
+
+        let preview = Cli::try_parse_from([
+            "opera",
+            "preview",
+            "--bbox",
+            "-119.95,35.85,-119.45,36.25",
+            "-o",
+            "out.png",
+            "--json",
+        ])
+        .expect("preview --json should parse");
+        assert!(matches!(
+            preview.command,
+            Some(Commands::Preview { json: true, .. })
+        ));
+
+        assert!(resolve_endpoint(Some("https://titiler-cmr.opengeos.org")).is_ok());
+        assert!(resolve_endpoint(Some("http://localhost:8080")).is_ok());
+        assert!(resolve_endpoint(Some("file:///etc/passwd")).is_err());
     }
 }
