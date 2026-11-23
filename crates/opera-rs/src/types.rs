@@ -105,15 +105,17 @@ impl BBox {
         })
     }
 
-    /// Expands small boxes symmetrically so both spans are at least `min_span_deg`.
+    /// Expands small boxes symmetrically so both spans are at least `min_span_deg`,
+    /// preserving valid WGS 84 coordinate ordering (`west < east`, `south < north`).
     pub fn expand_min_span(self, min_span_deg: f64) -> Self {
-        let lon_pad = (min_span_deg - (self.east - self.west)).max(0.0) * 0.5;
-        let lat_pad = (min_span_deg - (self.north - self.south)).max(0.0) * 0.5;
+        let min_span = min_span_deg.max(0.0);
+        let lon_pad = (min_span - (self.east - self.west)).max(0.0) * 0.5;
+        let lat_pad = (min_span - (self.north - self.south)).max(0.0) * 0.5;
         Self {
             west: (self.west - lon_pad).max(-180.0),
-            south: (self.south - lat_pad).max(-85.0),
+            south: (self.south - lat_pad).max(-90.0),
             east: (self.east + lon_pad).min(180.0),
-            north: (self.north + lat_pad).min(85.0),
+            north: (self.north + lat_pad).min(90.0),
         }
     }
 
@@ -309,9 +311,9 @@ impl CalendarDate {
         format!("{self}T00:00:00Z")
     }
 
-    /// Formats as `YYYY-MM-DDT23:59:59Z`.
+    /// Formats as `YYYY-MM-DDT23:59:59.999Z` to cover the full end day including fractional seconds.
     pub fn end_of_day_rfc3339(self) -> String {
-        format!("{self}T23:59:59Z")
+        format!("{self}T23:59:59.999Z")
     }
 }
 
@@ -369,6 +371,11 @@ mod tests {
         assert_eq!(b.to_geojson_feature()["geometry"]["type"], "Polygon");
         assert!("10,20,5,30".parse::<BBox>().is_err());
         assert!("-200,0,0,10".parse::<BBox>().is_err());
+        let arctic = BBox::new(0.0, 86.0, 1.0, 87.0)
+            .unwrap()
+            .expand_min_span(0.1);
+        assert!(arctic.south < arctic.north);
+        assert_eq!(arctic.north, 87.0);
     }
 
     #[test]

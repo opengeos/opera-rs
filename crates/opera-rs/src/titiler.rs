@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::DEFAULT_TITILER_ENDPOINT;
 use crate::error::{OperaError, Result};
-use crate::products::{OPERA_PIXEL_AREA_KM2, class_label};
+use crate::products::{LayerStyle, OPERA_PIXEL_AREA_KM2, class_label};
 use crate::types::{BBox, TitilerBackend, regex_escape, url_encode};
 
 /// TileMatrixSet identifier used by `titiler-cmr` XYZ tile endpoints.
@@ -78,6 +78,36 @@ impl TitilerQuery {
             minzoom: None,
             maxzoom: None,
         }
+    }
+
+    /// Applies a resolved [`LayerStyle`] (colormap JSON, colormap name, and rescale stretch).
+    pub fn apply_style(&mut self, style: &LayerStyle) -> &mut Self {
+        self.colormap = style.colormap.clone();
+        self.colormap_name = style.colormap_name.clone();
+        self.rescale = style.rescale.iter().cloned().collect();
+        self
+    }
+
+    /// Builds a styled `rasterio` query pinned to a single granule UR and band.
+    pub fn for_granule_band(
+        endpoint: impl Into<String>,
+        concept_id: impl Into<String>,
+        product: impl Into<String>,
+        granule_ur: impl Into<String>,
+        band: impl Into<String>,
+        expression: Option<String>,
+        style: Option<&LayerStyle>,
+    ) -> Self {
+        let mut q = Self::rasterio(concept_id);
+        q.endpoint = endpoint.into();
+        q.product = Some(product.into());
+        q.granule_ur = Some(granule_ur.into());
+        q.assets = vec![band.into()];
+        q.expression = expression;
+        if let Some(s) = style {
+            q.apply_style(s);
+        }
+        q
     }
 
     fn base(&self) -> &str {

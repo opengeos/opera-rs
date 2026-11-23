@@ -21,8 +21,9 @@ pub mod types;
 pub mod viz;
 
 pub use analysis::{
-    ChangeDetectionOptions, ChangeDetectionResult, ClassDelta, ObservationSummary, SeriesTrend,
-    TimeSeriesOptions, TimeSeriesResult, analyze_time_series, detect_change,
+    ChangeDetectionOptions, ChangeDetectionResult, ClassDelta, FailedObservation,
+    ObservationSummary, SeriesTrend, TimeSeriesOptions, TimeSeriesResult, analyze_time_series,
+    detect_change,
 };
 pub use cmr::{
     CmrSearchParams, GranuleSearchResult, OperaGranule, resolve_concept_id, search_granules,
@@ -50,8 +51,9 @@ pub use titiler::{
 pub use types::{BBox, CalendarDate, TitilerBackend};
 pub use viz::{
     CARTO_POSITRON_TEMPLATE, CARTO_VOYAGER_TEMPLATE, HtmlTileLayer, PreviewOptions,
-    build_interactive_html, combine_side_by_side, encode_animated_gif, encode_png_rgba,
-    export_interactive_html, render_preview_png,
+    build_html_tile_layers, build_interactive_html, combine_side_by_side, encode_animated_gif,
+    encode_png_rgba, export_interactive_html, render_animation_gif, render_change_comparison_png,
+    render_preview_png,
 };
 
 /// Package version string.

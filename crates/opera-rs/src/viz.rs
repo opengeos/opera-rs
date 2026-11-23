@@ -8,13 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{OperaError, Result};
-use crate::flood_extent::RgbaImage;
+use crate::flood_extent::{RgbaImage, TILE_SIZE};
 #[cfg(feature = "http")]
-use crate::flood_extent::{TILE_SIZE, choose_zoom, decode_png_rgba, tile_grid_for_bbox};
+use crate::flood_extent::{choose_zoom, decode_png_rgba, tile_grid_for_bbox};
 use crate::products::{LayerStyle, legend_entries};
-use crate::titiler::TitilerQuery;
-#[cfg(feature = "http")]
-use crate::titiler::build_tile_url_template;
+use crate::titiler::{TitilerQuery, build_tile_url_template};
 use crate::types::BBox;
 
 /// Public CARTO Positron XYZ basemap template (no API key required).
@@ -338,13 +336,20 @@ pub fn stitch_tile_templates(
         data: [241, 245, 249, 255].repeat(stitch_w * stitch_h),
     };
 
-    let mut layers: Vec<String> = Vec::new();
+    let mut layers: Vec<(bool, String)> = Vec::new();
     if basemap {
-        layers.push(CARTO_VOYAGER_TEMPLATE.to_string());
+        layers.push((true, CARTO_VOYAGER_TEMPLATE.to_string()));
     }
-    layers.extend(tile_templates.iter().cloned());
+    for tpl in tile_templates {
+        layers.push((false, tpl.clone()));
+    }
 
-    for template in &layers {
+    let mut opera_succeeded = 0usize;
+    let mut opera_failed = 0usize;
+    let mut first_opera_error: Option<String> = None;
+    const BATCH_SIZE: usize = 16;
+
+    for (is_basemap, template) in &layers {
         let mut jobs = Vec::new();
         for ty in ty0..=ty1 {
             for tx in tx0..=tx1 {
@@ -356,37 +361,58 @@ pub fn stitch_tile_templates(
             }
         }
 
-        #[cfg(feature = "parallel")]
-        let tiles: Vec<(u32, u32, Option<RgbaImage>)> = {
-            use rayon::prelude::*;
-            jobs.into_par_iter()
+        for chunk in jobs.chunks(BATCH_SIZE) {
+            #[cfg(feature = "parallel")]
+            let tiles: Vec<(u32, u32, Result<RgbaImage>)> = {
+                use rayon::prelude::*;
+                chunk
+                    .par_iter()
+                    .map(|(tx, ty, url)| {
+                        let res = crate::cmr::http_get_bytes(url).and_then(|b| decode_png_rgba(&b));
+                        (*tx, *ty, res)
+                    })
+                    .collect()
+            };
+
+            #[cfg(not(feature = "parallel"))]
+            let tiles: Vec<(u32, u32, Result<RgbaImage>)> = chunk
+                .iter()
                 .map(|(tx, ty, url)| {
-                    let img = crate::cmr::http_get_bytes(&url)
-                        .ok()
-                        .and_then(|b| decode_png_rgba(&b).ok());
-                    (tx, ty, img)
+                    let res = crate::cmr::http_get_bytes(url).and_then(|b| decode_png_rgba(&b));
+                    (*tx, *ty, res)
                 })
-                .collect()
-        };
+                .collect();
 
-        #[cfg(not(feature = "parallel"))]
-        let tiles: Vec<(u32, u32, Option<RgbaImage>)> = jobs
-            .into_iter()
-            .map(|(tx, ty, url)| {
-                let img = crate::cmr::http_get_bytes(&url)
-                    .ok()
-                    .and_then(|b| decode_png_rgba(&b).ok());
-                (tx, ty, img)
-            })
-            .collect();
-
-        for (tx, ty, img_opt) in tiles {
-            if let Some(tile) = img_opt {
-                let ox = (tx - tx0) as usize * TILE_SIZE;
-                let oy = (ty - ty0) as usize * TILE_SIZE;
-                composite_over(&mut canvas, &tile, ox, oy);
+            for (tx, ty, res) in tiles {
+                match res {
+                    Ok(tile) => {
+                        if !*is_basemap {
+                            opera_succeeded += 1;
+                        }
+                        let ox = (tx - tx0) as usize * TILE_SIZE;
+                        let oy = (ty - ty0) as usize * TILE_SIZE;
+                        composite_over(&mut canvas, &tile, ox, oy);
+                    }
+                    Err(err) => {
+                        if !*is_basemap {
+                            opera_failed += 1;
+                            if first_opera_error.is_none() {
+                                first_opera_error = Some(err.to_string());
+                            }
+                        }
+                    }
+                }
             }
         }
+    }
+
+    if !tile_templates.is_empty() && opera_succeeded == 0 {
+        return Err(OperaError::Http(format!(
+            "all {opera_failed} OPERA tile request(s) failed{}",
+            first_opera_error
+                .map(|e| format!(" (first error: {e})"))
+                .unwrap_or_default()
+        )));
     }
 
     let origin_px = (tx0 as usize * TILE_SIZE) as f64;
@@ -442,13 +468,204 @@ pub fn combine_side_by_side(left: &RgbaImage, right: &RgbaImage) -> RgbaImage {
     out
 }
 
+/// Renders a side-by-side Before | After comparison PNG for a [`crate::analysis::ChangeDetectionResult`].
+#[cfg(feature = "http")]
+pub fn render_change_comparison_png(
+    res: &crate::analysis::ChangeDetectionResult,
+    bbox: BBox,
+    endpoint: &str,
+    expression: Option<&str>,
+) -> Result<Vec<u8>> {
+    let style = LayerStyle::for_band(&res.product, Some(&res.band), true, None, None);
+    let b_query = TitilerQuery::for_granule_band(
+        endpoint,
+        &res.concept_id,
+        &res.product,
+        &res.before.granule_id,
+        &res.band,
+        expression.map(ToString::to_string),
+        Some(&style),
+    );
+    let a_query = TitilerQuery::for_granule_band(
+        endpoint,
+        &res.concept_id,
+        &res.product,
+        &res.after.granule_id,
+        &res.band,
+        expression.map(ToString::to_string),
+        Some(&style),
+    );
+    let b_tpl = build_tile_url_template(&b_query, TILE_SIZE as u32);
+    let a_tpl = build_tile_url_template(&a_query, TILE_SIZE as u32);
+    let mut left = stitch_tile_templates(bbox, &[b_tpl], 3, 512, true)?;
+    let mut right = stitch_tile_templates(bbox, &[a_tpl], 3, 512, true)?;
+    decorate_preview(
+        &mut left,
+        &PreviewOptions {
+            title: Some(format!("BEFORE {}", res.before.acquired_date)),
+            water_only: true,
+            legend: false,
+            ..PreviewOptions::new(bbox, &res.product, Some(res.band.clone()))
+        },
+    );
+    decorate_preview(
+        &mut right,
+        &PreviewOptions {
+            title: Some(format!("AFTER {}", res.after.acquired_date)),
+            water_only: true,
+            scale_bar: false,
+            ..PreviewOptions::new(bbox, &res.product, Some(res.band.clone()))
+        },
+    );
+    let combined = combine_side_by_side(&left, &right);
+    encode_png_rgba(&combined)
+}
+
+#[cfg(not(feature = "http"))]
+pub fn render_change_comparison_png(
+    _res: &crate::analysis::ChangeDetectionResult,
+    _bbox: BBox,
+    _endpoint: &str,
+    _expression: Option<&str>,
+) -> Result<Vec<u8>> {
+    Err(OperaError::HttpDisabled)
+}
+
+/// Renders an animated time-series GIF across chronologically sampled OPERA granules.
+///
+/// Returns `(gif_bytes, frame_dates)`.
+#[cfg(feature = "http")]
+#[allow(clippy::too_many_arguments)]
+pub fn render_animation_gif(
+    bbox: BBox,
+    product: &str,
+    product_short_title: &str,
+    concept_id: &str,
+    granules: &[crate::cmr::OperaGranule],
+    band: &str,
+    water_only: bool,
+    max_dim: usize,
+    basemap: bool,
+    delay_cs: u16,
+    endpoint: &str,
+) -> Result<(Vec<u8>, Vec<String>)> {
+    if granules.is_empty() {
+        return Err(OperaError::NoResults(format!(
+            "no {product} granules available to animate"
+        )));
+    }
+    let style = LayerStyle::for_band(product, Some(band), water_only, None, None);
+    let mut frames = Vec::with_capacity(granules.len());
+    let mut dates = Vec::with_capacity(granules.len());
+    for g in granules {
+        let q = TitilerQuery::for_granule_band(
+            endpoint,
+            concept_id,
+            product,
+            &g.id,
+            band,
+            None,
+            Some(&style),
+        );
+        let tpl = build_tile_url_template(&q, TILE_SIZE as u32);
+        let mut img = stitch_tile_templates(bbox, &[tpl], 3, max_dim, basemap)?;
+        let mut opts = PreviewOptions::new(bbox, product, Some(band.to_string()));
+        opts.water_only = water_only;
+        opts.title = Some(format!("{product_short_title} {}", g.date));
+        decorate_preview(&mut img, &opts);
+        dates.push(g.date.clone());
+        frames.push(img);
+    }
+    let gif_bytes = encode_animated_gif(&frames, delay_cs)?;
+    Ok((gif_bytes, dates))
+}
+
+#[cfg(not(feature = "http"))]
+#[allow(clippy::too_many_arguments)]
+pub fn render_animation_gif(
+    _bbox: BBox,
+    _product: &str,
+    _product_short_title: &str,
+    _concept_id: &str,
+    _granules: &[crate::cmr::OperaGranule],
+    _band: &str,
+    _water_only: bool,
+    _max_dim: usize,
+    _basemap: bool,
+    _delay_cs: u16,
+    _endpoint: &str,
+) -> Result<(Vec<u8>, Vec<String>)> {
+    Err(OperaError::HttpDisabled)
+}
+
+/// Builds interactive MapLibre tile layer descriptors for a list of OPERA granules.
+pub fn build_html_tile_layers(
+    product: &str,
+    product_short_title: &str,
+    concept_id: &str,
+    granules: &[crate::cmr::OperaGranule],
+    band: &str,
+    style: &LayerStyle,
+    endpoint: &str,
+) -> Vec<HtmlTileLayer> {
+    granules
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let q = TitilerQuery::for_granule_band(
+                endpoint,
+                concept_id,
+                product,
+                &g.id,
+                band,
+                None,
+                Some(style),
+            );
+            HtmlTileLayer {
+                id: format!("opera-layer-{i}"),
+                label: format!("{product_short_title} {} ({})", g.date, g.tile),
+                tile_url: build_tile_url_template(&q, TILE_SIZE as u32),
+                opacity: 0.85,
+            }
+        })
+        .collect()
+}
+
 /// Encodes a sequence of equal-sized [`RgbaImage`] frames into an animated GIF byte vector.
 pub fn encode_animated_gif(frames: &[RgbaImage], delay_cs: u16) -> Result<Vec<u8>> {
     let first = frames.first().ok_or_else(|| {
         OperaError::InvalidInput("at least one frame is required to encode an animated GIF".into())
     })?;
-    let w = first.width as u16;
-    let h = first.height as u16;
+    if first.width == 0 || first.height == 0 {
+        return Err(OperaError::InvalidInput(
+            "GIF frame dimensions must be non-zero".into(),
+        ));
+    }
+    let w = u16::try_from(first.width)
+        .map_err(|_| OperaError::InvalidInput("GIF frame width exceeds u16::MAX".into()))?;
+    let h = u16::try_from(first.height)
+        .map_err(|_| OperaError::InvalidInput("GIF frame height exceeds u16::MAX".into()))?;
+    let expected_bytes = first
+        .width
+        .checked_mul(first.height)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| OperaError::InvalidInput("GIF frame buffer size overflow".into()))?;
+
+    for (idx, frame_img) in frames.iter().enumerate() {
+        if frame_img.width != first.width || frame_img.height != first.height {
+            return Err(OperaError::InvalidInput(format!(
+                "GIF frame {idx} has dimensions {}x{}, expected {}x{}",
+                frame_img.width, frame_img.height, first.width, first.height
+            )));
+        }
+        if frame_img.data.len() != expected_bytes {
+            return Err(OperaError::InvalidInput(format!(
+                "GIF frame {idx} RGBA buffer length is {}, expected {expected_bytes}",
+                frame_img.data.len()
+            )));
+        }
+    }
+
     let mut out = Vec::new();
     {
         let mut encoder = gif::Encoder::new(&mut out, w, h, &[])
@@ -469,6 +686,22 @@ pub fn encode_animated_gif(frames: &[RgbaImage], delay_cs: u16) -> Result<Vec<u8
     Ok(out)
 }
 
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn escape_json_for_script(json: &str) -> String {
+    json.replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
 /// Layer descriptor for [`export_interactive_html`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HtmlTileLayer {
@@ -487,20 +720,19 @@ pub fn build_interactive_html(
     overlay_geojson: Option<&Value>,
     style_hint: Option<&LayerStyle>,
 ) -> Result<String> {
-    let layers_json = serde_json::to_string(layers)?;
+    let layers_json = escape_json_for_script(&serde_json::to_string(layers)?);
     let overlay_json = match overlay_geojson {
-        Some(v) => serde_json::to_string(v)?,
+        Some(v) => escape_json_for_script(&serde_json::to_string(v)?),
         None => "null".to_string(),
     };
     let bounds_json = serde_json::to_string(&[[bbox.west, bbox.south], [bbox.east, bbox.north]])?;
-    let style_note = style_hint
-        .and_then(|s| s.colormap_name.as_deref().or(s.rescale.as_deref()))
-        .unwrap_or("OPERA default");
+    let style_note = escape_html(
+        style_hint
+            .and_then(|s| s.colormap_name.as_deref().or(s.rescale.as_deref()))
+            .unwrap_or("OPERA default"),
+    );
 
-    let safe_title = title
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
+    let safe_title = escape_html(title);
 
     Ok(format!(
         r#"<!DOCTYPE html>
@@ -562,8 +794,13 @@ map.on('load', () => {{
     map.addLayer({{ id: layer.id, type: 'raster', source: layer.id, paint: {{ 'raster-opacity': layer.opacity }} }});
     const row = document.createElement('label');
     row.className = 'layer-row';
-    row.innerHTML = `<input type="checkbox" checked /> <span>${{layer.label}}</span>`;
-    row.querySelector('input').addEventListener('change', (e) => {{
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = true;
+    const span = document.createElement('span');
+    span.textContent = layer.label;
+    row.append(input, ' ', span);
+    input.addEventListener('change', (e) => {{
       map.setLayoutProperty(layer.id, 'visibility', e.target.checked ? 'visible' : 'none');
     }});
     container.appendChild(row);
@@ -640,22 +877,44 @@ mod tests {
     }
 
     #[test]
-    fn builds_interactive_html_document() {
+    fn builds_interactive_html_document_and_escapes_untrusted_strings() {
+        let style = LayerStyle {
+            colormap: None,
+            colormap_name: Some("<b>bad</b>".into()),
+            rescale: None,
+        };
         let html = build_interactive_html(
-            "Tulare Lake Flood",
+            "Tulare Lake <Flood>",
             BBox::new(-119.9, 35.8, -119.4, 36.3).unwrap(),
             &[HtmlTileLayer {
                 id: "dswx".into(),
-                label: "DSWx-HLS B01_WTR".into(),
+                label: "</script><img src=x onerror=alert(1)>".into(),
                 tile_url: "https://example.org/{z}/{x}/{y}.png".into(),
                 opacity: 0.85,
             }],
             None,
-            None,
+            Some(&style),
         )
         .unwrap();
         assert!(html.contains("maplibregl.Map"));
-        assert!(html.contains("Tulare Lake Flood"));
-        assert!(html.contains("DSWx-HLS B01_WTR"));
+        assert!(html.contains("Tulare Lake &lt;Flood&gt;"));
+        assert!(!html.contains("<b>bad</b>"));
+        assert!(!html.contains("</script><img"));
+        assert!(html.contains("span.textContent = layer.label"));
+    }
+
+    #[test]
+    fn rejects_mismatched_gif_frame_dimensions() {
+        let a = RgbaImage {
+            width: 4,
+            height: 4,
+            data: vec![0; 4 * 4 * 4],
+        };
+        let b = RgbaImage {
+            width: 8,
+            height: 4,
+            data: vec![0; 8 * 4 * 4],
+        };
+        assert!(encode_animated_gif(&[a, b], 50).is_err());
     }
 }

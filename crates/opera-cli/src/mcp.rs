@@ -12,6 +12,13 @@
 //!   so multimodal agents can inspect surface water, disturbance, and SAR maps directly.
 //! - Curated MCP `prompts` guide agents through flood mapping, two-date change detection,
 //!   time-series analysis, and area exploration workflows.
+//!
+//! ## Security & Trust Boundary
+//! `opera mcp` runs locally with the invoking user's filesystem and network privileges (matching
+//! `terrio mcp` and `lidar mcp`). Each tool advertises MCP `annotations` (`readOnlyHint`,
+//! `destructiveHint`, `idempotentHint`, `openWorldHint`) so the MCP host/client can enforce user
+//! approval rules for file-writing or network-accessing calls. Custom `--endpoint` values are
+//! validated to use `http://` or `https://` schemes.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -47,6 +54,7 @@ const INSTRUCTIONS: &str = "opera-rs searches, visualizes, and analyzes NASA OPE
 - Start with `products --json` to inspect supported OPERA collections, aliases, and band defaults, or `geocode` to resolve a place name to a WGS 84 bounding box.\n\
 - For flood mapping, combine optical `dswx-hls` with cloud-penetrating radar `dswx-s1` (band `B01_WTR`). Use `--water-only` on `preview` so clouds and ocean masks stay transparent.\n\
 - Use `change` for two-date before/after analysis (water area deltas in km^2 or SAR backscatter shifts), `timeseries` for multi-date trends, and `flood-extent` to vectorize observed DSWx surface water into GeoJSON or GeoPackage polygons (explicitly OPERA-observed, not human-QAed).\n\
+- Use `flood-extent` with `-o FILE` (or `search` with `-o FILE` for large footprint results) when requesting `--json` so bulky GeoJSON polygons are written to disk rather than exceeding the 100 KB MCP response limit.\n\
 - Use `preview` without `-o` to receive the rendered map PNG directly as inline image content (with CARTO Voyager basemap, scale bar, and legend) without leaving temporary files behind.\n\
 - Use `prompts/list` for guided step-by-step OPERA analysis workflows.";
 
@@ -496,17 +504,26 @@ fn call_preview(opera: &[OsString], mut args: Vec<OsString>, cancel: &AtomicBool
         let content = res["content"]
             .as_array_mut()
             .expect("tool results always have content array");
-        let temp_phrase = format!(" to {}", path.display());
+        let temp_path_str = path.display().to_string();
+        let temp_phrase = format!(" to {temp_path_str}");
         let replacement = if png.is_some() {
             " as inline image content (no file kept; pass -o FILE to save it)"
         } else {
             " to a temporary file that has been removed"
         };
         for item in content.iter_mut() {
-            if let Some(text) = item["text"].as_str()
-                && text.contains(&temp_phrase)
-            {
-                item["text"] = Value::String(text.replace(&temp_phrase, replacement));
+            if let Some(text) = item["text"].as_str() {
+                if let Ok(mut parsed) = serde_json::from_str::<Value>(text)
+                    && parsed.get("output").and_then(Value::as_str) == Some(temp_path_str.as_str())
+                {
+                    parsed["output"] = Value::Null;
+                    parsed["inline_image"] = json!(png.is_some());
+                    if let Ok(pretty) = serde_json::to_string_pretty(&parsed) {
+                        item["text"] = Value::String(pretty);
+                    }
+                } else if text.contains(&temp_phrase) {
+                    item["text"] = Value::String(text.replace(&temp_phrase, replacement));
+                }
             }
         }
         match png {
@@ -531,56 +548,94 @@ fn call_preview(opera: &[OsString], mut args: Vec<OsString>, cancel: &AtomicBool
     result
 }
 
+fn has_json_flag(args: &[OsString]) -> bool {
+    for arg in args {
+        let s = arg.to_string_lossy();
+        if s == "--" {
+            break;
+        }
+        if s == "--json" {
+            return true;
+        }
+    }
+    false
+}
+
+fn format_command_output(
+    name: &str,
+    json_requested: bool,
+    status: ExitStatus,
+    stdout: BoundedOutput,
+    stderr: BoundedOutput,
+) -> (String, bool) {
+    let failed = !status.success();
+    let footer = if failed {
+        let code = status
+            .code()
+            .map_or_else(|| "a signal".to_string(), |c| format!("exit code {c}"));
+        format!("\n(opera {name} failed with {code})")
+    } else {
+        String::new()
+    };
+    let stream_budget = MAX_OUTPUT.saturating_sub(footer.len());
+    let stderr_text = clip(
+        String::from_utf8_lossy(&stderr.0).into_owned(),
+        stderr.1,
+        stream_budget,
+    );
+    let sep_len = usize::from(!stderr_text.is_empty());
+    let stdout_budget = stream_budget
+        .saturating_sub(stderr_text.len())
+        .saturating_sub(sep_len);
+    let stdout_truncated =
+        !failed && json_requested && (stdout.1 > stdout_budget || stdout.0.len() > stdout_budget);
+    if stdout_truncated {
+        return (
+            format!(
+                "opera {name} --json produced {} bytes, exceeding the {} byte MCP response cap. \
+                 Pass `-o FILE` to save vector/GeoJSON output to disk (keeping `--json` compact) \
+                 or reduce `--limit` / `--max-observations`.",
+                stdout.1.max(stdout.0.len()),
+                MAX_OUTPUT
+            ),
+            true,
+        );
+    }
+    let mut text = if stdout_budget > 0 {
+        clip(
+            String::from_utf8_lossy(&stdout.0).into_owned(),
+            stdout.1,
+            stdout_budget,
+        )
+    } else {
+        String::new()
+    };
+    if !stderr_text.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&stderr_text);
+    }
+    if !footer.is_empty() {
+        text.push_str(&footer);
+    }
+    if text.trim().is_empty() {
+        text = format!("opera {name} finished.");
+    }
+    (text, failed)
+}
+
 fn call_command(
     opera: &[OsString],
     name: &str,
     args: Vec<OsString>,
     cancel: &AtomicBool,
 ) -> Option<Value> {
+    let json_requested = has_json_flag(&args);
     let (text, failed) = match run_child(opera, name, args, cancel) {
         Ok(None) => return None,
         Ok(Some((status, stdout, stderr))) => {
-            let failed = !status.success();
-            let footer = if failed {
-                let code = status
-                    .code()
-                    .map_or_else(|| "a signal".to_string(), |c| format!("exit code {c}"));
-                format!("\n(opera {name} failed with {code})")
-            } else {
-                String::new()
-            };
-            let stream_budget = MAX_OUTPUT.saturating_sub(footer.len());
-            let stderr_text = clip(
-                String::from_utf8_lossy(&stderr.0).into_owned(),
-                stderr.1,
-                stream_budget,
-            );
-            let sep_len = usize::from(!stderr_text.is_empty());
-            let stdout_budget = stream_budget
-                .saturating_sub(stderr_text.len())
-                .saturating_sub(sep_len);
-            let mut text = if stdout_budget > 0 {
-                clip(
-                    String::from_utf8_lossy(&stdout.0).into_owned(),
-                    stdout.1,
-                    stdout_budget,
-                )
-            } else {
-                String::new()
-            };
-            if !stderr_text.is_empty() {
-                if !text.is_empty() && !text.ends_with('\n') {
-                    text.push('\n');
-                }
-                text.push_str(&stderr_text);
-            }
-            if !footer.is_empty() {
-                text.push_str(&footer);
-            }
-            if text.trim().is_empty() {
-                text = format!("opera {name} finished.");
-            }
-            (text, failed)
+            format_command_output(name, json_requested, status, stdout, stderr)
         }
         Err(e) => (format!("could not run opera: {e}"), true),
     };
@@ -623,7 +678,6 @@ fn run_child(
         .args(before)
         .arg(name)
         .args(args)
-        .env("OPERA_MCP_TOOL", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -919,11 +973,12 @@ fn get_prompt(params: &Value) -> Result<Value, RpcError> {
             let product = opt_arg("product", "dswx-hls");
             let out = opt_arg("out_dir", "");
             let flag = aoi_flag(&aoi);
-            let extra = if out.is_empty() {
-                String::new()
+            let steps = if out.is_empty() {
+                "3. Summarize min/max/mean values, net change, linear trend slope per day, and key anomaly dates.".to_string()
             } else {
                 format!(
-                    "\n3. Save CSV to `{out}/timeseries.csv` (`--csv-out`) and render an animated GIF with `animate` into `{out}/timeseries.gif`."
+                    "3. Save CSV to `{out}/timeseries.csv` (`--csv-out`) and render an animated GIF with `animate` into `{out}/timeseries.gif`.\n\
+                     4. Summarize min/max/mean values, net change, linear trend slope per day, and key anomaly dates."
                 )
             };
             Ok(json!({
@@ -935,8 +990,8 @@ fn get_prompt(params: &Value) -> Result<Value, RpcError> {
                         "text": format!(
                             "Analyze `{product}` temporal trends over `{aoi}` from `{start}` to `{end}`:\n\
                              1. Run `timeseries` with `[\"--product\", \"{product}\", \"{flag}\", \"{aoi}\", \"--start\", \"{start}\", \"--end\", \"{end}\", \"--max-observations\", \"12\", \"--json\"]`.\n\
-                             2. Preview the peak observation date inline with `preview` (omit `-o`).{extra}\n\
-                             4. Summarize min/max/mean values, net change, linear trend slope per day, and key anomaly dates."
+                             2. Preview the peak observation date inline with `preview` (omit `-o`).\n\
+                             {steps}"
                         )
                     }
                 }]
@@ -1143,5 +1198,65 @@ mod tests {
         let clipped = clip("hello world".repeat(10), 110, 60);
         assert!(clipped.len() <= 60);
         assert!(clipped.contains("output cut"));
+    }
+
+    #[test]
+    fn numbers_timeseries_prompt_steps_and_rejects_truncated_json() {
+        let mut s = server();
+        let without_out = request(
+            &mut s,
+            "prompts/get",
+            json!({
+                "name": "analyze-water-timeseries",
+                "arguments": {
+                    "place_or_bbox": "Tulare Lake, California",
+                    "start": "2023-03-01",
+                    "end": "2023-06-30"
+                }
+            }),
+        );
+        let text = without_out["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("3. Summarize"));
+        assert!(!text.contains("4. Summarize"));
+
+        let with_out = request(
+            &mut s,
+            "prompts/get",
+            json!({
+                "name": "analyze-water-timeseries",
+                "arguments": {
+                    "place_or_bbox": "Tulare Lake, California",
+                    "start": "2023-03-01",
+                    "end": "2023-06-30",
+                    "out_dir": "results"
+                }
+            }),
+        );
+        let text_out = with_out["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text_out.contains("3. Save CSV"));
+        assert!(text_out.contains("4. Summarize"));
+
+        let ok_status = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" })
+            .args(if cfg!(windows) {
+                &["/C", "exit 0"][..]
+            } else {
+                &[][..]
+            })
+            .status()
+            .unwrap();
+        let oversized = vec![b'x'; MAX_OUTPUT];
+        let (msg, failed) = format_command_output(
+            "flood-extent",
+            true,
+            ok_status,
+            (oversized, MAX_OUTPUT + 500),
+            (Vec::new(), 0),
+        );
+        assert!(failed);
+        assert!(msg.contains("-o FILE"));
     }
 }
