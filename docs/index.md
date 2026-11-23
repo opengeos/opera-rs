@@ -68,7 +68,8 @@ Try `opera-rs` right now with zero local setup in the [Google Colab notebook](ht
 
     # Detect two-date surface-water expansion
     chg = opera_rs.detect_change(bbox, "2023-01-15", "2023-04-30", product="dswx-hls")
-    print(f"Open water delta: {chg['open_water_delta_km2']:+.2f} km^2")
+    delta = chg["open_water_delta_km2"]
+    print(f"Open water delta: {delta:+.2f} km^2" if delta is not None else "Open water delta: unavailable")
     ```
 
 === "Rust"

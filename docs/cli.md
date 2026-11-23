@@ -1,6 +1,6 @@
 # CLI Reference
 
-The `opera` command-line tool provides 13 structured NASA OPERA subcommands, a built-in Model Context Protocol server (`opera mcp`), structured `--json` output on every command, and a machine-readable `--json-usage` catalog flag.
+The `opera` command-line tool provides 13 structured NASA OPERA subcommands (each supporting `--json` output and `--json-usage` schema introspection) plus a built-in Model Context Protocol server (`opera mcp`).
 
 ## Spatial AOI Selection
 
@@ -61,7 +61,7 @@ opera stats --product dswx-hls --bbox -119.95,35.85,-119.45,36.25 \
 
 # Build offline titiler-cmr URLs for rasterio (DSWx-HLS) or xarray (DISP-S1)
 opera tilejson --product dswx-hls --water-only --url-only --json
-opera tilejson --product disp-s1 --backend xarray --variables displacement --group / --url-only --json
+opera tilejson --product disp-s1 --backend xarray --variable displacement --group / --url-only --json
 ```
 
 ### Change Detection and Time Series
@@ -107,7 +107,7 @@ opera inspect OPERA_L3_DSWx-HLS_B01_WTR.tif --product dswx-hls --json
 
 ## Machine-Readable Usage Catalog
 
-Every command supports `--json` for structured output and `--json-usage` for schema introspection by AI agents and scripts:
+Every data subcommand (excluding `mcp`) supports `--json` for structured output and `--json-usage` for schema introspection by AI agents and scripts:
 
 ```sh
 opera --json-usage

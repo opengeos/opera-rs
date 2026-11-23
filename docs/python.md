@@ -50,7 +50,7 @@ bbox = [-119.95, 35.85, -119.45, 36.25]
 # 3. Search NASA CMR for DSWx-HLS granules and write footprints to GeoPackage
 res = opera_rs.search("dswx-hls", bbox=bbox, start="2023-04-20", end="2023-04-30", limit=10)
 opera_rs.write_vector(res["feature_collection"], "tulare_footprints.gpkg", layer_name="footprints")
-print("AOI bbox from GeoPackage:", opera_rs.read_aoi_bbox("tulare_footprints.gpkg"))
+print("Footprint bounds from GeoPackage:", opera_rs.read_aoi_bbox("tulare_footprints.gpkg"))
 
 # 4. Sample a pixel and compute zonal categorical water statistics (30 m class areas in km^2)
 pt = opera_rs.point(-119.72, 36.05, product="dswx-hls", temporal="2023-04-20/2023-04-30")
@@ -63,7 +63,8 @@ for cls in first_band["class_breakdown"]:
 
 # 5. Two-date change detection and multi-date time series
 chg = opera_rs.detect_change(bbox, "2023-01-15", "2023-04-30", product="dswx-hls")
-print(f"Open water delta: {chg['open_water_delta_km2']:+.2f} km^2")
+delta = chg["open_water_delta_km2"]
+print(f"Open water delta: {delta:+.2f} km^2" if delta is not None else "Open water delta: unavailable")
 
 ts = opera_rs.analyze_time_series(
     bbox, "2023-01-01", "2023-05-15", product="dswx-hls", interval_days=20, max_observations=6
