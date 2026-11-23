@@ -7,13 +7,14 @@ import sys
 
 
 def main() -> int:
-    """Run the ``opera`` CLI using the bundled Rust implementation."""
+    """Run the ``opera`` CLI (including ``opera mcp``) using the bundled Rust implementation."""
     from opera_rs._opera_rs import cli_main
 
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    return cli_main(["opera", *sys.argv[1:]])
+    # `opera mcp` invokes each tool as `python -m opera_rs <subcommand>`.
+    return cli_main(["opera", *sys.argv[1:]], [sys.executable, "-m", "opera_rs"])
 
 
 if __name__ == "__main__":

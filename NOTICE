@@ -12,6 +12,7 @@ from Remote Sensing Analysis (OPERA) project and distributed by NASA's PO.DAAC,
 LP DAAC, and ASF DAAC.
 
 Third-party crates used directly include:
+- `terrio` (https://github.com/opengeos/terrio): MIT AND MPL-2.0 AND Apache-2.0
 - `clap` (https://github.com/clap-rs/clap): MIT OR Apache-2.0
 - `gif` (https://github.com/image-rs/image-gif): MIT OR Apache-2.0
 - `png` (https://github.com/image-rs/image-png): MIT OR Apache-2.0
