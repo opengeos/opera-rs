@@ -208,14 +208,32 @@ impl ChangeDetectionResult {
 
 /// Extracts `(open_water_km2, total_water_km2)` from categorical DSWx class statistics.
 ///
-/// For binary water bands (`B02_BWTR`, where class 1 combines open and partial water),
-/// pass `binary_water = true` so `open_water_km2` is left as `None` and `total_water_km2`
-/// reports the combined class 1 area.
+/// - For binary water bands (`B02_BWTR`, where class 1 combines open and partial water),
+///   pass `binary_water = true` so `open_water_km2` is left as `None` and `total_water_km2`
+///   reports class 1 area.
+/// - For DSWx-S1 `B01_WTR` (where class 3 is inundated vegetation), pass
+///   `include_inundated_veg = true` so `total_water_km2` sums classes 1 + 2 + 3.
+/// - Returns `(None, None)` when the histogram contains only masked/nodata classes (such as
+///   cloud/shadow class 253 or snow/ice class 252) with zero observed land or water pixels.
 pub fn extract_dswx_water_areas_for_band(
     stats: &BandStatistics,
     binary_water: bool,
+    include_inundated_veg: bool,
 ) -> (Option<f64>, Option<f64>) {
     if stats.class_breakdown.is_empty() {
+        return (None, None);
+    }
+    let has_observed_land_or_water = stats.class_breakdown.iter().any(|c| {
+        let valid_class = if binary_water {
+            matches!(c.class_value, 0 | 1)
+        } else if include_inundated_veg {
+            matches!(c.class_value, 0..=3)
+        } else {
+            matches!(c.class_value, 0..=2)
+        };
+        valid_class && c.pixel_count > 0.0
+    });
+    if !has_observed_land_or_water {
         return (None, None);
     }
     let class1 = stats
@@ -231,7 +249,16 @@ pub fn extract_dswx_water_areas_for_band(
         .iter()
         .find(|c| c.class_value == i64::from(DSWX_PARTIAL_WATER_CLASS))
         .map_or(0.0, |c| c.area_km2);
-    (Some(class1), Some(class1 + partial))
+    let inundated_veg = if include_inundated_veg {
+        stats
+            .class_breakdown
+            .iter()
+            .find(|c| c.class_value == 3)
+            .map_or(0.0, |c| c.area_km2)
+    } else {
+        0.0
+    };
+    (Some(class1), Some(class1 + partial + inundated_veg))
 }
 
 /// Computes class-by-class deltas between two categorical [`BandStatistics`] snapshots.
@@ -384,6 +411,12 @@ pub fn detect_change(opts: &ChangeDetectionOptions) -> Result<ChangeDetectionRes
             after_g.date, after_tile_count, after_g.id, after_g.tile
         ));
     }
+    if !before_g.tile.is_empty() && !after_g.tile.is_empty() && before_g.tile != after_g.tile {
+        warnings.push(format!(
+            "baseline granule '{}' (tile {}) and comparison granule '{}' (tile {}) come from different tiles/bursts; deltas may reflect footprint differences",
+            before_g.id, before_g.tile, after_g.id, after_g.tile
+        ));
+    }
     let concept_id = before_g
         .concept_id
         .clone()
@@ -410,6 +443,7 @@ pub fn detect_change(opts: &ChangeDetectionOptions) -> Result<ChangeDetectionRes
     let is_water = expression.is_none() && is_dswx_water_band(&prod.short_name, Some(&band));
     let is_binary_water =
         expression.is_none() && is_dswx_binary_water_band(&prod.short_name, Some(&band));
+    let include_inundated_veg = prod.short_name.to_ascii_uppercase().contains("DSWX-S1");
     let endpoint = opts
         .titiler_endpoint
         .as_deref()
@@ -424,7 +458,7 @@ pub fn detect_change(opts: &ChangeDetectionOptions) -> Result<ChangeDetectionRes
         q.expression = expression.clone();
         let stats = first_band_stats(fetch_statistics(&q, &aoi, categorical, None)?)?;
         let (open_w, total_w) = if is_water {
-            extract_dswx_water_areas_for_band(&stats, is_binary_water)
+            extract_dswx_water_areas_for_band(&stats, is_binary_water, include_inundated_veg)
         } else {
             (None, None)
         };
@@ -558,12 +592,12 @@ impl TimeSeriesResult {
     /// Exports observations as RFC 4180 CSV (`date,granule_id,tile,mean,valid_percent,open_water_km2,total_water_km2`).
     pub fn to_csv(&self) -> String {
         let mut out = String::from(
-            "date,granule_id,tile,mean,valid_percent,open_water_km2,total_water_km2\n",
+            "date,granule_id,tile,mean,valid_percent,open_water_km2,total_water_km2\r\n",
         );
         for obs in &self.observations {
             let opt = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
             out.push_str(&format!(
-                "{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{},{}\r\n",
                 csv_escape(&obs.acquired_date),
                 csv_escape(&obs.granule_id),
                 csv_escape(&obs.tile),
@@ -701,18 +735,17 @@ pub fn fetch_time_series_candidates(
     let mut candidate_granules = Vec::new();
     let mut warnings = Vec::new();
     if search.hits > 500 && target_samples > 1 {
-        let total_days = end_date.days_between(start_date).max(1);
-        let buckets = target_samples.clamp(2, 24) as i64;
-        let step = (total_days / buckets).max(1);
+        let inclusive_days = end_date.days_between(start_date).max(0) + 1;
+        let buckets = (target_samples.clamp(2, 24) as i64).min(inclusive_days);
         let mut failed_buckets = 0i64;
         let mut first_err: Option<String> = None;
         for i in 0..buckets {
-            let b_start = start_date.add_days(i * step);
-            let b_end = if i == buckets - 1 {
-                end_date
-            } else {
-                start_date.add_days(((i + 1) * step - 1).min(total_days))
-            };
+            let start_offset = (i * inclusive_days) / buckets;
+            let end_offset = (((i + 1) * inclusive_days) / buckets - 1)
+                .max(start_offset)
+                .min(inclusive_days - 1);
+            let b_start = start_date.add_days(start_offset);
+            let b_end = start_date.add_days(end_offset);
             match search_granules_sorted(
                 &CmrSearchParams {
                     product: prod.short_name.clone(),
@@ -858,6 +891,7 @@ pub fn analyze_time_series(opts: &TimeSeriesOptions) -> Result<TimeSeriesResult>
     let is_water = expression.is_none() && is_dswx_water_band(&prod.short_name, Some(&band));
     let is_binary_water =
         expression.is_none() && is_dswx_binary_water_band(&prod.short_name, Some(&band));
+    let include_inundated_veg = prod.short_name.to_ascii_uppercase().contains("DSWX-S1");
     let endpoint = opts
         .titiler_endpoint
         .as_deref()
@@ -875,7 +909,11 @@ pub fn analyze_time_series(opts: &TimeSeriesOptions) -> Result<TimeSeriesResult>
         match fetch_statistics(&q, &aoi, categorical, None).and_then(first_band_stats) {
             Ok(stats) => {
                 let (open_w, total_w) = if is_water {
-                    extract_dswx_water_areas_for_band(&stats, is_binary_water)
+                    extract_dswx_water_areas_for_band(
+                        &stats,
+                        is_binary_water,
+                        include_inundated_veg,
+                    )
                 } else {
                     (None, None)
                 };

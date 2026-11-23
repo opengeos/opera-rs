@@ -106,16 +106,42 @@ impl BBox {
     }
 
     /// Expands small boxes symmetrically so both spans are at least `min_span_deg`,
-    /// preserving valid WGS 84 coordinate ordering (`west < east`, `south < north`).
+    /// preserving valid WGS 84 coordinate ordering (`west < east`, `south < north`)
+    /// and shifting clipped padding to the opposite endpoint near world limits.
     pub fn expand_min_span(self, min_span_deg: f64) -> Self {
+        fn expand_axis(
+            lo: f64,
+            hi: f64,
+            min_span: f64,
+            bound_lo: f64,
+            bound_hi: f64,
+        ) -> (f64, f64) {
+            let target = min_span.min(bound_hi - bound_lo);
+            let span = hi - lo;
+            if span >= target {
+                return (lo, hi);
+            }
+            let pad = (target - span) * 0.5;
+            let mut new_lo = lo - pad;
+            let mut new_hi = hi + pad;
+            if new_lo < bound_lo {
+                new_hi = (new_hi + (bound_lo - new_lo)).min(bound_hi);
+                new_lo = bound_lo;
+            }
+            if new_hi > bound_hi {
+                new_lo = (new_lo - (new_hi - bound_hi)).max(bound_lo);
+                new_hi = bound_hi;
+            }
+            (new_lo, new_hi)
+        }
         let min_span = min_span_deg.max(0.0);
-        let lon_pad = (min_span - (self.east - self.west)).max(0.0) * 0.5;
-        let lat_pad = (min_span - (self.north - self.south)).max(0.0) * 0.5;
+        let (west, east) = expand_axis(self.west, self.east, min_span, -180.0, 180.0);
+        let (south, north) = expand_axis(self.south, self.north, min_span, -90.0, 90.0);
         Self {
-            west: (self.west - lon_pad).max(-180.0),
-            south: (self.south - lat_pad).max(-90.0),
-            east: (self.east + lon_pad).min(180.0),
-            north: (self.north + lat_pad).min(90.0),
+            west,
+            south,
+            east,
+            north,
         }
     }
 
