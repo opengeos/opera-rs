@@ -43,6 +43,7 @@ pub use products::{
     DSWX_WTR_COLORMAP_JSON, DSWX_WTR_WATER_ONLY_COLORMAP_JSON, ExpressionPreset, LayerStyle,
     OPERA_PIXEL_AREA_KM2, OPERA_PIXEL_SIZE_METERS, OperaProduct, catalog, class_label,
     expression_presets, find_product, is_categorical_band, is_dswx_water_band, legend_entries,
+    should_use_categorical,
 };
 pub use titiler::{
     BandStatistics, ClassBreakdown, PointAssetValue, PointResult, StatisticsResult, TileJson,
@@ -53,8 +54,9 @@ pub use titiler::{
 pub use types::{BBox, CalendarDate, TitilerBackend};
 pub use viz::{
     CARTO_POSITRON_TEMPLATE, CARTO_VOYAGER_TEMPLATE, HtmlTileLayer, PreviewOptions,
-    build_interactive_html, combine_side_by_side, encode_animated_gif, encode_png_rgba,
-    export_interactive_html, render_preview_png,
+    build_html_tile_layers, build_interactive_html, combine_side_by_side, encode_animated_gif,
+    encode_png_rgba, export_interactive_html, render_animation_gif, render_change_comparison_png,
+    render_preview_png,
 };
 
 /// Package version string.

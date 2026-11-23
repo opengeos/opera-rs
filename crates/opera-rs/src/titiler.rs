@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::DEFAULT_TITILER_ENDPOINT;
 use crate::error::{OperaError, Result};
-use crate::products::{OPERA_PIXEL_AREA_KM2, class_label};
+use crate::products::{LayerStyle, OPERA_PIXEL_AREA_KM2, class_label};
 use crate::types::{BBox, TitilerBackend, regex_escape, url_encode};
 
 /// TileMatrixSet identifier used by `titiler-cmr` XYZ tile endpoints.
@@ -35,6 +35,11 @@ pub fn resolve_titiler_endpoint(explicit: Option<&str>) -> Result<String> {
     if !(raw.starts_with("https://") || raw.starts_with("http://")) {
         return Err(OperaError::InvalidInput(format!(
             "titiler endpoint must start with http:// or https://, got '{raw}'"
+        )));
+    }
+    if raw.contains('?') || raw.contains('#') {
+        return Err(OperaError::InvalidInput(format!(
+            "titiler endpoint must not contain query or fragment components, got '{raw}'"
         )));
     }
     Ok(raw)
@@ -101,6 +106,48 @@ impl TitilerQuery {
             minzoom: None,
             maxzoom: None,
         }
+    }
+
+    /// Applies a resolved [`LayerStyle`] (colormap JSON, colormap name, and rescale stretch).
+    pub fn apply_style(&mut self, style: &LayerStyle) -> &mut Self {
+        self.colormap = style.colormap.clone();
+        self.colormap_name = style.colormap_name.clone();
+        self.rescale = style.rescale.iter().cloned().collect();
+        self
+    }
+
+    /// Builds a styled `rasterio` query pinned to a single granule UR and band.
+    ///
+    /// Rejects empty `granule_ur` or `band` values so the granule filter is never silently dropped.
+    pub fn for_granule_band(
+        endpoint: impl Into<String>,
+        concept_id: impl Into<String>,
+        product: impl Into<String>,
+        granule_ur: impl Into<String>,
+        band: impl Into<String>,
+        expression: Option<String>,
+        style: Option<&LayerStyle>,
+    ) -> Result<Self> {
+        let ur = granule_ur.into();
+        if ur.trim().is_empty() {
+            return Err(OperaError::InvalidInput(
+                "granule_ur must not be empty".into(),
+            ));
+        }
+        let b = band.into();
+        if b.trim().is_empty() {
+            return Err(OperaError::InvalidInput("band must not be empty".into()));
+        }
+        let mut q = Self::rasterio(concept_id);
+        q.endpoint = endpoint.into();
+        q.product = Some(product.into());
+        q.granule_ur = Some(ur);
+        q.assets = vec![b];
+        q.expression = expression;
+        if let Some(s) = style {
+            q.apply_style(s);
+        }
+        Ok(q)
     }
 
     fn base(&self) -> &str {

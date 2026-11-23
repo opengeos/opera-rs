@@ -434,6 +434,25 @@ pub fn is_categorical_band(short_name: &str, band: Option<&str>) -> bool {
     (p.contains("DSWX") && b.contains("WTR")) || (p.contains("DIST") && b.contains("STATUS"))
 }
 
+/// Resolves whether a statistics request should enable categorical histogram mode.
+///
+/// Honors an explicit `override_categorical` choice; otherwise enables categorical mode when
+/// no non-empty band-math `expression` is set and the product/band is categorical.
+pub fn should_use_categorical(
+    short_name: &str,
+    band: Option<&str>,
+    expression: Option<&str>,
+    override_categorical: Option<bool>,
+) -> bool {
+    override_categorical.unwrap_or_else(|| {
+        expression
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+            && is_categorical_band(short_name, band)
+    })
+}
+
 /// Returns `true` when the product/band is an OPERA DSWx water-classification layer.
 pub fn is_dswx_water_band(short_name: &str, band: Option<&str>) -> bool {
     let Some(band) = band else {
