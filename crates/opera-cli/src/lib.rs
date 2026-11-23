@@ -4,13 +4,14 @@ pub mod mcp;
 mod usage;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use opera_rs::analysis::{
     ChangeDetectionOptions, TimeSeriesOptions, analyze_time_series, detect_change,
+    fetch_time_series_candidates,
 };
-use opera_rs::cmr::{CmrSearchParams, resolve_concept_id, search_granules};
+use opera_rs::cmr::{CmrSearchParams, resolve_aoi_layer, resolve_concept_id, search_granules};
 use opera_rs::flood_extent::{FloodExtentOptions, derive_flood_extent};
 use opera_rs::geo_io::{inspect_local_raster, read_aoi_bbox, write_feature_collection};
 use opera_rs::geocode::geocode_place;
@@ -565,12 +566,11 @@ where
     run_with_self_command(args, None)
 }
 
-/// Runs the CLI, using `self_cmd` (e.g. `python -P -m opera_rs`) when `opera mcp` spawns child
-/// tools.
+/// Runs the CLI, optionally overriding the child command line used by `opera mcp` to spawn tools.
 ///
-/// The standalone Rust binary passes `None` (re-invoking `std::env::current_exe()`), while the
-/// Python `opera-rs` wheel passes `[sys.executable, "-P", "-m", "opera_rs"]` so MCP tool calls
-/// invoke the bundled extension without needing a separate native binary on `PATH`.
+/// The standalone Rust binary passes `None` (re-invoking `std::env::current_exe()`). Language
+/// wrappers (such as the Python wheel) can pass e.g. `[sys.executable, "-P", "-m", "opera_rs"]`
+/// so MCP tool calls invoke the bundled extension without needing a separate native binary on `PATH`.
 pub fn run_with_self_command<I, T>(args: I, self_cmd: Option<Vec<OsString>>) -> i32
 where
     I: IntoIterator<Item = T>,
@@ -642,6 +642,20 @@ where
 fn print_json(val: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(val)?);
     Ok(())
+}
+
+fn write_output(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+fn require_band(band: Option<String>) -> Result<String> {
+    band.ok_or_else(|| OperaError::InvalidInput("specify --band".into()))
 }
 
 fn dispatch(command: Commands) -> Result<()> {
@@ -970,39 +984,20 @@ fn dispatch(command: Commands) -> Result<()> {
             endpoint,
             json: as_json,
         } => {
-            let prod = find_product(&product)?;
             let (bbox, place_name) = aoi.resolve_required()?;
-            let (cid, resolved_granule, chosen_band) = if let Some(g) = granule {
+            let (prod, cid, resolved_granule, chosen_band) = if let Some(g) = granule {
+                let prod = find_product(&product)?;
                 let c = match concept_id {
                     Some(cid) => cid,
                     None => resolve_concept_id(&prod.short_name, None)?,
                 };
-                let b = band
-                    .or_else(|| prod.default_bands.first().cloned())
-                    .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
-                (c, Some(g), b)
+                let b = require_band(band.or_else(|| prod.default_bands.first().cloned()))?;
+                (prod, c, Some(g), b)
             } else {
-                let search = search_granules(&CmrSearchParams {
-                    product: prod.short_name.clone(),
-                    bbox: Some(bbox),
-                    start,
-                    end,
-                    limit: 5,
-                    deduplicate_versions: true,
-                    newest_per_tile: true,
-                    cmr_endpoint: None,
-                })?;
-                let first = search.granules.first().ok_or_else(|| {
-                    OperaError::NoResults(format!("no {} granules found in AOI", prod.short_name))
-                })?;
-                let c = concept_id
-                    .or_else(|| first.concept_id.clone())
-                    .or(search.concept_id)
-                    .ok_or_else(|| OperaError::NoResults("missing concept_id".into()))?;
-                let b = band
-                    .or_else(|| prod.choose_band(&first.bands))
-                    .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
-                (c, Some(first.id.clone()), b)
+                let resolved =
+                    resolve_aoi_layer(&product, bbox, start, end, 1, band, concept_id, None)?;
+                let g_id = resolved.granules.first().map(|g| g.id.clone());
+                (resolved.product, resolved.concept_id, g_id, resolved.band)
             };
 
             let is_cat = categorical
@@ -1093,12 +1088,7 @@ fn dispatch(command: Commands) -> Result<()> {
 
             if let Some(preview_path) = &preview_out {
                 let bytes = render_change_comparison_png(&res, bbox, &ep, expression.as_deref())?;
-                if let Some(parent) = preview_path.parent()
-                    && !parent.as_os_str().is_empty()
-                {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(preview_path, bytes)?;
+                write_output(preview_path, bytes)?;
             }
 
             if as_json {
@@ -1162,12 +1152,7 @@ fn dispatch(command: Commands) -> Result<()> {
                 cmr_endpoint: None,
             })?;
             if let Some(csv_path) = &csv_out {
-                if let Some(parent) = csv_path.parent()
-                    && !parent.as_os_str().is_empty()
-                {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(csv_path, res.to_csv())?;
+                write_output(csv_path, res.to_csv())?;
             }
             if as_json {
                 print_json(&serde_json::to_value(&res)?)?;
@@ -1295,49 +1280,25 @@ fn dispatch(command: Commands) -> Result<()> {
             output,
             json: as_json,
         } => {
-            let prod = find_product(&product)?;
             let (bbox, place_name) = aoi.resolve_required()?;
             let ep = resolve_endpoint(endpoint.as_deref())?;
 
-            let (cid, chosen_granules, chosen_band, date_label) = if !granules.is_empty() {
+            let (prod, cid, chosen_granules, chosen_band, date_label) = if !granules.is_empty() {
+                let prod = find_product(&product)?;
                 let cid = resolve_concept_id(&prod.short_name, None)?;
-                let b = band
-                    .or_else(|| prod.default_bands.first().cloned())
-                    .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
-                (cid, granules, b, None)
+                let b = require_band(band.or_else(|| prod.default_bands.first().cloned()))?;
+                (prod, cid, granules, b, None)
             } else {
-                let search = search_granules(&CmrSearchParams {
-                    product: prod.short_name.clone(),
-                    bbox: Some(bbox),
-                    start,
-                    end,
-                    limit: max_granules.clamp(1, 15) * 3,
-                    deduplicate_versions: true,
-                    newest_per_tile: true,
-                    cmr_endpoint: None,
-                })?;
-                let first = search.granules.first().ok_or_else(|| {
-                    OperaError::NoResults(format!(
-                        "no {} granules found over {}",
-                        prod.short_name, bbox
-                    ))
-                })?;
-                let cid = search
-                    .concept_id
-                    .clone()
-                    .or_else(|| first.concept_id.clone())
-                    .ok_or_else(|| OperaError::NoResults("missing concept_id".into()))?;
-                let b = band
-                    .or_else(|| prod.choose_band(&first.bands))
-                    .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
-                let latest_date = search.dates.first().cloned();
-                let urs: Vec<String> = search
-                    .granules
-                    .into_iter()
-                    .take(max_granules.clamp(1, 15))
-                    .map(|g| g.id)
-                    .collect();
-                (cid, urs, b, latest_date)
+                let resolved =
+                    resolve_aoi_layer(&product, bbox, start, end, max_granules, band, None, None)?;
+                let urs: Vec<String> = resolved.granules.into_iter().map(|g| g.id).collect();
+                (
+                    resolved.product,
+                    resolved.concept_id,
+                    urs,
+                    resolved.band,
+                    resolved.latest_date,
+                )
             };
 
             let style = LayerStyle::for_band(
@@ -1379,12 +1340,7 @@ fn dispatch(command: Commands) -> Result<()> {
             opts.title = banner;
 
             let png_bytes = render_preview_png(&queries, &opts)?;
-            if let Some(parent) = output.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&output, &png_bytes)?;
+            write_output(&output, &png_bytes)?;
             if as_json {
                 print_json(&json!({
                     "product": prod.short_name,
@@ -1432,30 +1388,28 @@ fn dispatch(command: Commands) -> Result<()> {
             let prod = find_product(&product)?;
             let (bbox, _) = aoi.resolve_required()?;
             let ep = resolve_endpoint(endpoint.as_deref())?;
-            let search = search_granules(&CmrSearchParams {
-                product: prod.short_name.clone(),
-                bbox: Some(bbox),
-                start: Some(start),
-                end: Some(end),
-                limit: 150,
-                deduplicate_versions: true,
-                newest_per_tile: false,
-                cmr_endpoint: None,
-            })?;
-            if search.granules.is_empty() {
+            let frame_cap = max_frames.clamp(1, 30);
+            let (concept_id, candidates) = fetch_time_series_candidates(
+                &prod.short_name,
+                bbox,
+                &start,
+                &end,
+                frame_cap,
+                None,
+            )?;
+            if candidates.is_empty() {
                 return Err(OperaError::NoResults(format!(
                     "no {} granules found to animate",
                     prod.short_name
                 )));
             }
-            let cid = search
-                .concept_id
-                .clone()
+            let cid = concept_id
+                .or_else(|| candidates.iter().find_map(|g| g.concept_id.clone()))
                 .ok_or_else(|| OperaError::NoResults("missing concept_id".into()))?;
             let sampled = opera_rs::analysis::sample_granules_chronologically(
-                search.granules,
+                candidates,
                 interval_days,
-                max_frames.clamp(1, 30),
+                frame_cap,
             );
             let first = sampled.first().ok_or_else(|| {
                 OperaError::NoResults(format!(
@@ -1463,9 +1417,7 @@ fn dispatch(command: Commands) -> Result<()> {
                     prod.short_name
                 ))
             })?;
-            let chosen_band = band
-                .or_else(|| prod.choose_band(&first.bands))
-                .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
+            let chosen_band = require_band(band.or_else(|| prod.choose_band(&first.bands)))?;
 
             let (gif_bytes, dates) = render_animation_gif(
                 bbox,
@@ -1480,12 +1432,7 @@ fn dispatch(command: Commands) -> Result<()> {
                 delay_cs,
                 &ep,
             )?;
-            if let Some(parent) = output.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&output, &gif_bytes)?;
+            write_output(&output, &gif_bytes)?;
             if as_json {
                 print_json(&json!({
                     "product": prod.short_name,
@@ -1519,47 +1466,21 @@ fn dispatch(command: Commands) -> Result<()> {
             output,
             json: as_json,
         } => {
-            let prod = find_product(&product)?;
             let (bbox, place_name) = aoi.resolve_required()?;
             let ep = resolve_endpoint(endpoint.as_deref())?;
-            let search = search_granules(&CmrSearchParams {
-                product: prod.short_name.clone(),
-                bbox: Some(bbox),
-                start,
-                end,
-                limit: max_granules.clamp(1, 15) * 3,
-                deduplicate_versions: true,
-                newest_per_tile: true,
-                cmr_endpoint: None,
-            })?;
-            let first = search.granules.first().ok_or_else(|| {
-                OperaError::NoResults(format!(
-                    "no {} granules found over {}",
-                    prod.short_name, bbox
-                ))
-            })?;
-            let cid = search
-                .concept_id
-                .clone()
-                .or_else(|| first.concept_id.clone())
-                .ok_or_else(|| OperaError::NoResults("missing concept_id".into()))?;
-            let chosen_band = band
-                .or_else(|| prod.choose_band(&first.bands))
-                .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
+            let resolved =
+                resolve_aoi_layer(&product, bbox, start, end, max_granules, band, None, None)?;
+            let prod = resolved.product;
+            let cid = resolved.concept_id;
+            let chosen_band = resolved.band;
             let style =
                 LayerStyle::for_band(&prod.short_name, Some(&chosen_band), water_only, None, None);
 
-            let selected_granules: Vec<_> = search
-                .granules
-                .iter()
-                .take(max_granules.clamp(1, 15))
-                .cloned()
-                .collect();
             let layers = build_html_tile_layers(
                 &prod.short_name,
                 &prod.short_title,
                 &cid,
-                &selected_granules,
+                &resolved.granules,
                 &chosen_band,
                 &style,
                 &ep,
@@ -1582,7 +1503,7 @@ fn dispatch(command: Commands) -> Result<()> {
                 &page_title,
                 bbox,
                 &layers,
-                Some(&search.feature_collection),
+                Some(&resolved.feature_collection),
                 Some(&style),
             )?;
 

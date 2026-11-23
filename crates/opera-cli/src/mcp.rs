@@ -161,7 +161,14 @@ impl Server {
         }
     }
 
-    /// Cancels all running tool processes and joins worker threads (called on client EOF).
+    /// Waits for all in-flight tool calls to finish and emit their replies (called on stdin EOF).
+    pub fn drain(mut self) {
+        for w in self.workers.drain(..) {
+            let _ = w.join();
+        }
+    }
+
+    /// Cancels all running tool processes immediately and joins worker threads.
     pub fn shutdown(mut self) {
         for cancel in self
             .running
@@ -742,7 +749,11 @@ pub fn serve(opera: Vec<OsString>) -> std::io::Result<()> {
         }
         Ok(())
     })();
-    server.shutdown();
+    if read.is_ok() {
+        server.drain();
+    } else {
+        server.shutdown();
+    }
     drop(send);
     writer.join().unwrap_or(Ok(())).and(read)
 }
