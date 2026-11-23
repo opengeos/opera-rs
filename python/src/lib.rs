@@ -12,7 +12,7 @@ use opera_rs::flood_extent::{FloodExtentOptions, derive_flood_extent};
 use opera_rs::geo_io::{inspect_local_raster, read_aoi_bbox, write_feature_collection};
 use opera_rs::geocode::geocode_place;
 use opera_rs::products::{
-    LayerStyle, catalog, expression_presets, find_product, is_categorical_band,
+    LayerStyle, catalog, expression_presets, find_product, should_use_categorical,
 };
 use opera_rs::titiler::{
     TitilerQuery, build_tile_url_template, build_tilejson_url, fetch_bbox_statistics, fetch_point,
@@ -185,11 +185,16 @@ fn point_json(
             };
             let mut q = TitilerQuery::rasterio(&cid);
             q.endpoint = ep;
+            q.backend = prod.backend;
             q.product = Some(prod.short_name.clone());
             q.granule_ur = granule_ur;
             q.temporal = temporal;
             if let Some(b) = band.or_else(|| prod.default_bands.first().cloned()) {
-                q.assets = vec![b];
+                if prod.backend == TitilerBackend::Xarray {
+                    q.variables = vec![b];
+                } else {
+                    q.assets = vec![b];
+                }
             }
             q.expression = expression;
             fetch_point(&q, lon, lat)
@@ -245,14 +250,12 @@ fn stats_json(
                 (resolved.product, resolved.concept_id, g_id, resolved.band)
             };
 
-            let is_cat = categorical.unwrap_or_else(|| {
-                expression
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .is_none()
-                    && is_categorical_band(&prod.short_name, Some(&chosen_band))
-            });
+            let is_cat = should_use_categorical(
+                &prod.short_name,
+                Some(&chosen_band),
+                expression.as_deref(),
+                categorical,
+            );
             let mut q = TitilerQuery::rasterio(&cid);
             q.endpoint = ep;
             q.product = Some(prod.short_name);
@@ -406,11 +409,12 @@ fn preview_png<'py>(
                         Some(&style),
                     )
                 })
-                .collect();
+                .collect::<opera_rs::Result<Vec<_>>>()?;
             let mut opts = PreviewOptions::new(parsed_bbox, &prod.short_name, Some(chosen_band));
             opts.water_only = water_only;
             opts.max_dim = max_dim;
             opts.basemap = basemap;
+            opts.legend = style.colormap.is_some();
             opts.title = title;
             let bytes = render_preview_png(&queries, &opts)?;
             if let Some(p) = output_path {
