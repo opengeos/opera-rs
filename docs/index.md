@@ -2,7 +2,7 @@
 
 Pure-Rust, agent-centric toolkit for searching, visualizing, and analyzing [NASA OPERA](https://www.jpl.nasa.gov/go/opera) satellite products (DSWx-HLS, DSWx-S1, DIST-ALERT, DIST-ANN, RTC-S1, CSLC-S1, DISP-S1) via NASA CMR, `titiler-cmr`, and [`terrio`](https://github.com/opengeos/terrio).
 
-- **Zero GDAL or C/C++ dependencies:** Pure Rust across the `opera-rs` crate, `opera` CLI, `opera mcp` server, and `opera-rs` Python wheels.
+- **Zero GDAL dependencies:** Rust core across the `opera-rs` crate (`--no-default-features` has zero C/C++ dependencies), `opera` CLI, `opera mcp` server, and `opera-rs` Python wheels.
 - **No Earthdata login required:** Public NASA CMR granule discovery and server-side authenticated `titiler-cmr` tile rendering, pixel sampling, and AOI statistics.
 - **Agent-centric by design:** Structured `--json` output on every subcommand, machine-readable `--json-usage` catalog, and a pure-Rust Model Context Protocol (MCP) server (`opera mcp`) with inline PNG map previews and curated remote-sensing workflow prompts.
 

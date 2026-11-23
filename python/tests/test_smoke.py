@@ -93,6 +93,9 @@ def test_validation_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError):
         opera_rs.tile_urls("C2617126679-POCLOUD", backend="invalid-backend")
 
+    with pytest.raises(ValueError):
+        opera_rs.tile_urls("C2617126679-POCLOUD", product="unknown-product")
+
     monkeypatch.setenv("OPERA_TITILER_ENDPOINT", "https://custom-titiler.example.org")
     custom_urls = opera_rs.tile_urls(
         "C2617126679-POCLOUD",

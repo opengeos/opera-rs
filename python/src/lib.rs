@@ -27,6 +27,7 @@ use pyo3::types::PyBytes;
 fn to_py_err(err: OperaError) -> PyErr {
     match err {
         OperaError::InvalidInput(msg) => PyValueError::new_err(msg),
+        err @ OperaError::UnknownProduct(_) => PyValueError::new_err(err.to_string()),
         other => PyRuntimeError::new_err(other.to_string()),
     }
 }
@@ -130,11 +131,8 @@ fn tile_urls_json(
     }
     let parsed_backend: TitilerBackend = backend.parse().map_err(to_py_err)?;
     let ep = resolve_titiler_endpoint(endpoint).map_err(to_py_err)?;
-    let prod_info = product.and_then(|p| find_product(p).ok());
-    let prod_name = prod_info
-        .as_ref()
-        .map(|p| p.short_name.as_str())
-        .or(product);
+    let prod_info = product.map(find_product).transpose().map_err(to_py_err)?;
+    let prod_name = prod_info.as_ref().map(|p| p.short_name.as_str());
     let chosen_bands = match bands {
         Some(b) if !b.is_empty() => b,
         _ if parsed_backend == TitilerBackend::Rasterio => prod_info
