@@ -821,6 +821,85 @@ pub fn search_granules(_params: &CmrSearchParams) -> Result<GranuleSearchResult>
     Err(OperaError::HttpDisabled)
 }
 
+/// Resolved product metadata, collection concept-id, granules, and band for an AOI query.
+#[derive(Debug, Clone)]
+pub struct ResolvedAoiLayer {
+    pub product: crate::products::OperaProduct,
+    pub concept_id: String,
+    pub granules: Vec<OperaGranule>,
+    pub band: String,
+    pub latest_date: Option<String>,
+    pub feature_collection: Value,
+}
+
+/// Searches NASA CMR for the newest matching granules of `product` over `bbox`, resolving the
+/// collection `concept_id` and selecting the best available band.
+#[cfg(feature = "http")]
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_aoi_layer(
+    product: &str,
+    bbox: BBox,
+    start: Option<String>,
+    end: Option<String>,
+    max_granules: usize,
+    band: Option<String>,
+    concept_id: Option<String>,
+    cmr_endpoint: Option<String>,
+) -> Result<ResolvedAoiLayer> {
+    let prod = find_product(product)?;
+    let cap = max_granules.clamp(1, 15);
+    let search = search_granules(&CmrSearchParams {
+        product: prod.short_name.clone(),
+        bbox: Some(bbox),
+        start,
+        end,
+        limit: cap * 3,
+        deduplicate_versions: true,
+        newest_per_tile: true,
+        cmr_endpoint,
+    })?;
+    let first = search.granules.first().ok_or_else(|| {
+        OperaError::NoResults(format!("no {} granules found over {bbox}", prod.short_name))
+    })?;
+    let cid = concept_id
+        .or_else(|| search.concept_id.clone())
+        .or_else(|| first.concept_id.clone())
+        .ok_or_else(|| OperaError::NoResults("missing concept_id".into()))?;
+    let chosen_band = band
+        .or_else(|| prod.choose_band(&first.bands))
+        .ok_or_else(|| {
+            OperaError::InvalidInput(format!(
+                "no default band available for product '{}'; specify a band explicitly",
+                prod.short_name
+            ))
+        })?;
+    let latest_date = search.dates.first().cloned();
+    let granules = search.granules.into_iter().take(cap).collect();
+    Ok(ResolvedAoiLayer {
+        product: prod,
+        concept_id: cid,
+        granules,
+        band: chosen_band,
+        latest_date,
+        feature_collection: search.feature_collection,
+    })
+}
+
+#[cfg(not(feature = "http"))]
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_aoi_layer(
+    _product: &str,
+    _bbox: BBox,
+    _start: Option<String>,
+    _end: Option<String>,
+    _max_granules: usize,
+    _band: Option<String>,
+    _concept_id: Option<String>,
+    _cmr_endpoint: Option<String>,
+) -> Result<ResolvedAoiLayer> {
+    Err(OperaError::HttpDisabled)
+}
+
 #[cfg(feature = "http")]
 pub(crate) fn http_agent() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
@@ -834,7 +913,19 @@ pub(crate) fn http_agent() -> ureq::Agent {
 }
 
 #[cfg(feature = "http")]
+fn validate_http_url(url: &str) -> Result<()> {
+    if url.starts_with("https://") || url.starts_with("http://") {
+        Ok(())
+    } else {
+        Err(OperaError::InvalidInput(format!(
+            "HTTP request URL must start with http:// or https://, got '{url}'"
+        )))
+    }
+}
+
+#[cfg(feature = "http")]
 pub(crate) fn http_get_text(url: &str) -> Result<String> {
+    validate_http_url(url)?;
     let agent = http_agent();
     let mut resp = agent
         .get(url)
@@ -848,6 +939,7 @@ pub(crate) fn http_get_text(url: &str) -> Result<String> {
 
 #[cfg(feature = "http")]
 pub(crate) fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
+    validate_http_url(url)?;
     let agent = http_agent();
     let mut resp = agent
         .get(url)
@@ -862,6 +954,7 @@ pub(crate) fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
 
 #[cfg(feature = "http")]
 pub(crate) fn http_post_json(url: &str, body: &Value) -> Result<String> {
+    validate_http_url(url)?;
     let agent = http_agent();
     let payload = serde_json::to_string(body)?;
     let mut resp = agent

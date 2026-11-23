@@ -29,6 +29,8 @@ use crate::types::BBox;
 /// Tile edge length in pixels for Web Mercator XYZ grids.
 pub const TILE_SIZE: usize = 256;
 const MAX_TILES_ACROSS_CAP: usize = 32;
+#[cfg(feature = "http")]
+const MAX_TOTAL_TILE_REQUESTS: usize = 4096;
 
 /// Decoded RGBA raster image.
 #[derive(Debug, Clone)]
@@ -710,12 +712,13 @@ pub fn derive_flood_extent(opts: &FloodExtentOptions) -> Result<FloodExtentResul
             )));
         }
         let short_name = prod.short_name;
+        let max_granules = opts.max_granules_per_product.clamp(1, 25);
         let search = search_granules(&CmrSearchParams {
             product: short_name.clone(),
             bbox: Some(opts.bbox),
             start: Some(opts.start.clone()),
             end: Some(opts.end.clone()),
-            limit: opts.max_granules_per_product.clamp(1, 25),
+            limit: max_granules,
             deduplicate_versions: true,
             newest_per_tile: false,
             cmr_endpoint: opts.cmr_endpoint.clone(),
@@ -724,11 +727,7 @@ pub fn derive_flood_extent(opts: &FloodExtentOptions) -> Result<FloodExtentResul
             continue;
         }
         products_used.push(short_name.clone());
-        for g in search
-            .granules
-            .into_iter()
-            .take(opts.max_granules_per_product)
-        {
+        for g in search.granules.into_iter().take(max_granules) {
             let Some(cid) = g.concept_id.clone().or_else(|| search.concept_id.clone()) else {
                 continue;
             };
@@ -738,7 +737,7 @@ pub fn derive_flood_extent(opts: &FloodExtentOptions) -> Result<FloodExtentResul
             q.granule_ur = Some(g.id.clone());
             q.assets = vec!["B01_WTR".to_string()];
             q.colormap = Some(DSWX_WTR_WATER_ONLY_COLORMAP_JSON.to_string());
-            tile_templates.push(build_tile_url_template(&q, TILE_SIZE as u32));
+            tile_templates.push((build_tile_url_template(&q, TILE_SIZE as u32), g.bbox));
             granules_used.push(g.id);
         }
     }
@@ -759,8 +758,21 @@ pub fn derive_flood_extent(opts: &FloodExtentOptions) -> Result<FloodExtentResul
 
     let mut urls = Vec::new();
     for ty in ty0..=ty1 {
+        let [_, tile_north] = pixel_to_lon_lat(0.0, (ty as usize * TILE_SIZE) as f64, zoom);
+        let [_, tile_south] = pixel_to_lon_lat(0.0, ((ty as usize + 1) * TILE_SIZE) as f64, zoom);
         for tx in tx0..=tx1 {
-            for tpl in &tile_templates {
+            let [tile_west, _] = pixel_to_lon_lat((tx as usize * TILE_SIZE) as f64, 0.0, zoom);
+            let [tile_east, _] =
+                pixel_to_lon_lat(((tx as usize + 1) * TILE_SIZE) as f64, 0.0, zoom);
+            for (tpl, granule_bbox) in &tile_templates {
+                if let Some(gb) = granule_bbox
+                    && (tile_east < gb.west
+                        || tile_west > gb.east
+                        || tile_north < gb.south
+                        || tile_south > gb.north)
+                {
+                    continue;
+                }
                 let url = tpl
                     .replace("{z}", &zoom.to_string())
                     .replace("{x}", &tx.to_string())
@@ -768,6 +780,13 @@ pub fn derive_flood_extent(opts: &FloodExtentOptions) -> Result<FloodExtentResul
                 urls.push((tx, ty, url));
             }
         }
+    }
+
+    if urls.len() > MAX_TOTAL_TILE_REQUESTS {
+        return Err(OperaError::InvalidInput(format!(
+            "flood extent request requires {} tile fetches, exceeding the cap of {MAX_TOTAL_TILE_REQUESTS}; reduce max_tiles_across or max_granules_per_product",
+            urls.len()
+        )));
     }
 
     // Fetch and merge tiles in bounded batches so peak memory stays bounded even for large grids.

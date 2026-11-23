@@ -239,17 +239,17 @@ pub fn find_product(query: &str) -> Result<OperaProduct> {
 
 impl OperaProduct {
     /// Picks the best default band from a granule's available bands, falling back to the
-    /// product's first preferred band or the granule's first band.
+    /// granule's first available band or (if `available` is empty) the product's first preferred band.
     pub fn choose_band(&self, available: &[String]) -> Option<String> {
         for preferred in &self.default_bands {
             if let Some(found) = available.iter().find(|b| b.eq_ignore_ascii_case(preferred)) {
                 return Some(found.clone());
             }
         }
-        self.default_bands
+        available
             .first()
             .cloned()
-            .or_else(|| available.first().cloned())
+            .or_else(|| self.default_bands.first().cloned())
     }
 }
 
