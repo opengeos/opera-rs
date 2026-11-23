@@ -496,6 +496,8 @@ pub fn render_change_comparison_png(
     endpoint: &str,
     expression: Option<&str>,
 ) -> Result<Vec<u8>> {
+    // Use water-only styling for DSWx WTR previews so clouds/snow/ocean stay transparent over
+    // the CARTO basemap while the accompanying report tabulates full-class areas.
     let style =
         LayerStyle::for_request(&res.product, Some(&res.band), expression, true, None, None);
     let b_query = TitilerQuery::for_granule_band(
@@ -506,7 +508,7 @@ pub fn render_change_comparison_png(
         &res.band,
         expression.map(ToString::to_string),
         Some(&style),
-    );
+    )?;
     let a_query = TitilerQuery::for_granule_band(
         endpoint,
         &res.concept_id,
@@ -515,7 +517,7 @@ pub fn render_change_comparison_png(
         &res.band,
         expression.map(ToString::to_string),
         Some(&style),
-    );
+    )?;
     let b_tpl = build_tile_url_template(&b_query, TILE_SIZE as u32);
     let a_tpl = build_tile_url_template(&a_query, TILE_SIZE as u32);
     let mut left = stitch_tile_templates(bbox, &[b_tpl], 3, 512, true)?;
@@ -535,6 +537,7 @@ pub fn render_change_comparison_png(
             title: Some(format!("AFTER {}", res.after.acquired_date)),
             water_only: true,
             scale_bar: false,
+            legend: style.colormap.is_some(),
             ..PreviewOptions::new(bbox, &res.product, Some(res.band.clone()))
         },
     );
@@ -587,11 +590,13 @@ pub fn render_animation_gif(
             band,
             None,
             Some(&style),
-        );
+        )?;
         let tpl = build_tile_url_template(&q, TILE_SIZE as u32);
         let mut img = stitch_tile_templates(bbox, &[tpl], 3, max_dim, basemap)?;
         let mut opts = PreviewOptions::new(bbox, product, Some(band.to_string()));
         opts.water_only = water_only;
+        opts.basemap = basemap;
+        opts.legend = style.colormap.is_some();
         opts.title = Some(format!("{product_short_title} {}", g.date));
         decorate_preview(&mut img, &opts);
         dates.push(g.date.clone());
@@ -628,7 +633,7 @@ pub fn build_html_tile_layers(
     band: &str,
     style: &LayerStyle,
     endpoint: &str,
-) -> Vec<HtmlTileLayer> {
+) -> Result<Vec<HtmlTileLayer>> {
     granules
         .iter()
         .enumerate()
@@ -641,13 +646,13 @@ pub fn build_html_tile_layers(
                 band,
                 None,
                 Some(style),
-            );
-            HtmlTileLayer {
+            )?;
+            Ok(HtmlTileLayer {
                 id: format!("opera-layer-{i}"),
                 label: format!("{product_short_title} {} ({})", g.date, g.tile),
                 tile_url: build_tile_url_template(&q, TILE_SIZE as u32),
                 opacity: 0.85,
-            }
+            })
         })
         .collect()
 }

@@ -37,6 +37,11 @@ pub fn resolve_titiler_endpoint(explicit: Option<&str>) -> Result<String> {
             "titiler endpoint must start with http:// or https://, got '{raw}'"
         )));
     }
+    if raw.contains('?') || raw.contains('#') {
+        return Err(OperaError::InvalidInput(format!(
+            "titiler endpoint must not contain query or fragment components, got '{raw}'"
+        )));
+    }
     Ok(raw)
 }
 
@@ -112,6 +117,8 @@ impl TitilerQuery {
     }
 
     /// Builds a styled `rasterio` query pinned to a single granule UR and band.
+    ///
+    /// Rejects empty `granule_ur` or `band` values so the granule filter is never silently dropped.
     pub fn for_granule_band(
         endpoint: impl Into<String>,
         concept_id: impl Into<String>,
@@ -120,17 +127,27 @@ impl TitilerQuery {
         band: impl Into<String>,
         expression: Option<String>,
         style: Option<&LayerStyle>,
-    ) -> Self {
+    ) -> Result<Self> {
+        let ur = granule_ur.into();
+        if ur.trim().is_empty() {
+            return Err(OperaError::InvalidInput(
+                "granule_ur must not be empty".into(),
+            ));
+        }
+        let b = band.into();
+        if b.trim().is_empty() {
+            return Err(OperaError::InvalidInput("band must not be empty".into()));
+        }
         let mut q = Self::rasterio(concept_id);
         q.endpoint = endpoint.into();
         q.product = Some(product.into());
-        q.granule_ur = Some(granule_ur.into());
-        q.assets = vec![band.into()];
+        q.granule_ur = Some(ur);
+        q.assets = vec![b];
         q.expression = expression;
         if let Some(s) = style {
             q.apply_style(s);
         }
-        q
+        Ok(q)
     }
 
     fn base(&self) -> &str {

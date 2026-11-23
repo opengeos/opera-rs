@@ -47,6 +47,9 @@ const MAX_IMAGE: u64 = 8 << 20;
 /// Maximum concurrent tool calls running across the session.
 const MAX_CONCURRENT_TOOLS: usize = 8;
 
+/// Maximum total in-flight (running + queued) tool calls allowed before rejecting new requests.
+const MAX_PENDING_TOOLS: usize = 64;
+
 /// Instructions sent to the AI agent during MCP `initialize`.
 const INSTRUCTIONS: &str = "opera-rs searches, visualizes, and analyzes NASA OPERA satellite data (DSWx-HLS, DSWx-S1, DIST-ALERT, DIST-ANN, RTC-S1, CSLC-S1, DISP-S1) via public NASA CMR and titiler-cmr with zero GDAL dependencies and no Earthdata login required.\n\
 - Each tool runs one `opera` subcommand; pass `args` as an array of strings after the command name, e.g. `search` with [\"--product\", \"dswx-hls\", \"--place\", \"Tulare Lake, California\", \"--start\", \"2023-04-01\", \"--end\", \"2023-04-30\", \"--json\"].\n\
@@ -281,18 +284,23 @@ impl Server {
             return Some(match parse_tool_call(&params) {
                 Err((code, message)) => error(&id, code, &message),
                 Ok((name, args)) => {
-                    if self
-                        .running
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .contains_key(&id.to_string())
-                    {
+                    let running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
+                    if running.contains_key(&id.to_string()) {
                         return Some(error(
                             &id,
                             INVALID_REQUEST,
                             "a request id already in use by a running call",
                         ));
                     }
+                    let queued_in_batch = calls.as_ref().map_or(0, |(c, _)| c.len());
+                    if running.len() + queued_in_batch >= MAX_PENDING_TOOLS {
+                        return Some(error(
+                            &id,
+                            INTERNAL_ERROR,
+                            "too many pending tool calls; retry after active calls complete",
+                        ));
+                    }
+                    drop(running);
                     match calls {
                         Some((calls, ids)) => {
                             if !ids.insert(id.to_string()) {
