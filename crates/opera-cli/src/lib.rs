@@ -16,11 +16,12 @@ use opera_rs::flood_extent::{FloodExtentOptions, derive_flood_extent};
 use opera_rs::geo_io::{inspect_local_raster, read_aoi_bbox, write_feature_collection};
 use opera_rs::geocode::geocode_place;
 use opera_rs::products::{
-    LayerStyle, catalog, expression_presets, find_product, is_categorical_band,
+    LayerStyle, catalog, expression_presets, find_product, should_use_categorical,
 };
 use opera_rs::titiler::{
-    TitilerQuery, build_tile_url_template, fetch_bbox_statistics, fetch_point, fetch_tilejson,
-    fetch_timeseries_tilejson, resolve_titiler_endpoint,
+    TitilerQuery, build_tile_url_template, build_tilejson_url, build_timeseries_tilejson_url,
+    fetch_bbox_statistics, fetch_point, fetch_tilejson, fetch_timeseries_tilejson,
+    resolve_titiler_endpoint,
 };
 use opera_rs::types::{BBox, TitilerBackend};
 use opera_rs::viz::{
@@ -458,8 +459,8 @@ pub enum Commands {
         /// Minimum spacing in days between frames.
         #[arg(long)]
         interval_days: Option<i64>,
-        /// Frame delay in centiseconds (e.g. 75 = 0.75 s/frame).
-        #[arg(long, default_value_t = 75)]
+        /// Frame delay in centiseconds (minimum 10 = 0.10 s/frame; default 75 = 0.75 s/frame).
+        #[arg(long, default_value_t = 75, value_parser = clap::value_parser!(u16).range(10..))]
         delay_cs: u16,
         /// Band/asset token.
         #[arg(long)]
@@ -484,7 +485,7 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Export a self-contained interactive MapLibre GL JS HTML viewer for matching OPERA layers.
+    /// Export a single-file interactive MapLibre GL JS HTML viewer (requires network access for CDN & tiles).
     ExportHtml {
         /// OPERA product short name or alias.
         #[arg(short, long, default_value = "OPERA_L3_DSWX-HLS_V1")]
@@ -851,7 +852,10 @@ fn dispatch(command: Commands) -> Result<()> {
 
             let tile_template = build_tile_url_template(&query, 512);
             if url_only {
-                let tj_url = opera_rs::build_tilejson_url(&query);
+                let tj_url = match timeseries_step.as_deref() {
+                    Some(step) => build_timeseries_tilejson_url(&query, Some(step), None),
+                    None => build_tilejson_url(&query),
+                };
                 if as_json {
                     print_json(&json!({
                         "concept_id": resolved_cid,
@@ -916,11 +920,16 @@ fn dispatch(command: Commands) -> Result<()> {
             let chosen_band = band.or_else(|| prod.default_bands.first().cloned());
             let mut query = TitilerQuery::rasterio(&cid);
             query.endpoint = resolve_endpoint(endpoint.as_deref())?;
+            query.backend = prod.backend;
             query.product = Some(prod.short_name.clone());
             query.granule_ur = granule;
             query.temporal = temporal;
             if let Some(b) = chosen_band {
-                query.assets = vec![b];
+                if prod.backend == TitilerBackend::Xarray {
+                    query.variables = vec![b];
+                } else {
+                    query.assets = vec![b];
+                }
             }
             query.expression = expression;
 
@@ -934,12 +943,14 @@ fn dispatch(command: Commands) -> Result<()> {
                 );
                 for asset in &res.assets {
                     println!("  {}", asset.name);
-                    for ((val, bname), label) in asset
-                        .values
-                        .iter()
-                        .zip(asset.band_names.iter())
-                        .zip(asset.class_labels.iter())
-                    {
+                    for (idx, val) in asset.values.iter().enumerate() {
+                        let fallback_name = format!("band_{}", idx + 1);
+                        let bname = asset
+                            .band_names
+                            .get(idx)
+                            .map(String::as_str)
+                            .unwrap_or(&fallback_name);
+                        let label = asset.class_labels.get(idx).and_then(Option::as_deref);
                         let v_str = val
                             .map(|v| format!("{v}"))
                             .unwrap_or_else(|| "nodata".into());
@@ -983,13 +994,12 @@ fn dispatch(command: Commands) -> Result<()> {
                 (resolved.product, resolved.concept_id, g_id, resolved.band)
             };
 
-            let is_cat = categorical
-                || (expression
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .is_none()
-                    && is_categorical_band(&prod.short_name, Some(&chosen_band)));
+            let is_cat = should_use_categorical(
+                &prod.short_name,
+                Some(&chosen_band),
+                expression.as_deref(),
+                categorical.then_some(true),
+            );
             let mut query = TitilerQuery::rasterio(&cid);
             query.endpoint = resolve_endpoint(endpoint.as_deref())?;
             query.product = Some(prod.short_name.clone());
@@ -1311,7 +1321,7 @@ fn dispatch(command: Commands) -> Result<()> {
                         Some(&style),
                     )
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
 
             let banner = title.or_else(|| {
                 let base = format!("{} {}", prod.short_title, chosen_band);
@@ -1326,7 +1336,7 @@ fn dispatch(command: Commands) -> Result<()> {
             opts.max_tiles_across = max_tiles_across;
             opts.basemap = !no_basemap;
             opts.scale_bar = !no_scale_bar;
-            opts.legend = !no_legend;
+            opts.legend = !no_legend && style.colormap.is_some();
             opts.title = banner;
 
             let png_bytes = render_preview_png(&queries, &opts)?;
@@ -1401,18 +1411,27 @@ fn dispatch(command: Commands) -> Result<()> {
             let cid = concept_id
                 .or_else(|| candidates.iter().find_map(|g| g.concept_id.clone()))
                 .ok_or_else(|| OperaError::NoResults("missing concept_id".into()))?;
+            let chosen_band = require_band(
+                band.or_else(|| candidates.iter().find_map(|g| prod.choose_band(&g.bands))),
+            )?;
+            let matching_band: Vec<_> = candidates
+                .into_iter()
+                .filter(|g| {
+                    g.bands.is_empty()
+                        || g.bands.iter().any(|b| b.eq_ignore_ascii_case(&chosen_band))
+                })
+                .collect();
             let sampled = opera_rs::analysis::sample_granules_chronologically(
-                candidates,
+                matching_band,
                 interval_days,
                 frame_cap,
             );
-            let first = sampled.first().ok_or_else(|| {
-                OperaError::NoResults(format!(
-                    "no dated {} granules available to animate",
+            if sampled.is_empty() {
+                return Err(OperaError::NoResults(format!(
+                    "no dated {} granules with band '{chosen_band}' available to animate",
                     prod.short_name
-                ))
-            })?;
-            let chosen_band = require_band(band.or_else(|| prod.choose_band(&first.bands)))?;
+                )));
+            }
 
             let (gif_bytes, dates) = render_animation_gif(
                 bbox,
@@ -1480,7 +1499,7 @@ fn dispatch(command: Commands) -> Result<()> {
                 &chosen_band,
                 &style,
                 &ep,
-            );
+            )?;
 
             let page_title = title.unwrap_or_else(|| {
                 format!(
@@ -1590,6 +1609,8 @@ mod tests {
                 "10*log10(b1)",
                 "--rescale",
                 "-30,0",
+                "--endpoint",
+                "https://titiler-cmr.opengeos.org",
                 "--url-only",
                 "--json"
             ]),
