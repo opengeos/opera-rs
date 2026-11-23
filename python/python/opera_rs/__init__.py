@@ -179,7 +179,11 @@ def stats(
     histogram_bins: int | None = None,
     endpoint: str | None = None,
 ) -> dict[str, Any]:
-    """Compute zonal AOI statistics and 30 m categorical class area breakdowns."""
+    """Compute zonal AOI statistics and 30 m categorical class area breakdowns.
+
+    When ``granule_ur`` is provided, ``start`` and ``end`` are ignored because the request
+    is pinned directly to that granule.
+    """
     b = _require_bbox(bbox)
     return json.loads(
         _opera_rs.stats_json(

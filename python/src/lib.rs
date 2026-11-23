@@ -476,10 +476,15 @@ fn fetch_tilejson_json(
             );
             let mut q = TitilerQuery::rasterio(&cid);
             q.endpoint = ep;
+            q.backend = prod.backend;
             q.product = Some(prod.short_name);
             q.granule_ur = granule_ur;
             if let Some(b) = chosen_band {
-                q.assets = vec![b];
+                if prod.backend == TitilerBackend::Xarray {
+                    q.variables = vec![b];
+                } else {
+                    q.assets = vec![b];
+                }
             }
             q.apply_style(&style);
             fetch_tilejson(&q)
