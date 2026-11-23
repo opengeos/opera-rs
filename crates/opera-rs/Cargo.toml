@@ -12,4 +12,25 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
-default = []
+default = ["http", "geo", "parallel"]
+## Enable live HTTPS requests to NASA CMR, titiler-cmr, and Nominatim via pure-Rust `ureq` + `rustls`
+http = ["dep:ureq"]
+## Pure-Rust geospatial raster/vector I/O (GeoTIFF/COG, GeoPackage, Shapefile, CRS) via `terrio`
+geo = ["dep:terrio"]
+## Multi-threaded tile fetching and raster rendering via `rayon`
+parallel = ["dep:rayon"]
+
+[dependencies]
+gif.workspace = true
+png.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rayon = { workspace = true, optional = true }
+terrio = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
