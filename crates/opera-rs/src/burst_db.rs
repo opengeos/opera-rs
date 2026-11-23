@@ -253,9 +253,47 @@ pub fn fetch_burst_db_file(asset: BurstDbAsset, cache_dir: Option<&Path>) -> Res
         )));
     }
 
-    let tmp_name = format!(".{}.{}.tmp", asset.filename(), std::process::id());
-    let tmp_path = dir.join(tmp_name);
-    std::fs::write(&tmp_path, &bytes)?;
+    let pid = std::process::id();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut tmp_path = None;
+    let mut tmp_file = None;
+    for attempt in 0u32..32 {
+        let candidate = dir.join(format!(
+            ".{}.{}.{}.{}.tmp",
+            asset.filename(),
+            pid,
+            nonce,
+            attempt
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(f) => {
+                tmp_path = Some(candidate);
+                tmp_file = Some(f);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(OperaError::Io(e)),
+        }
+    }
+    let tmp_path = tmp_path.ok_or_else(|| {
+        OperaError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate unique temp file for burst_db cache",
+        ))
+    })?;
+    let mut tmp_file = tmp_file.expect("file opened alongside path");
+    if let Err(err) = std::io::Write::write_all(&mut tmp_file, &bytes) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(OperaError::Io(err));
+    }
+    drop(tmp_file);
     if let Err(err) = std::fs::rename(&tmp_path, &target) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(OperaError::Io(err));
@@ -322,7 +360,7 @@ pub fn reproject_bbox_to_wgs84(src_epsg: u32, bounds: [f64; 4]) -> Result<BBox> 
 }
 
 #[cfg(not(feature = "geo"))]
-fn reproject_bbox_to_wgs84(src_epsg: u32, bounds: [f64; 4]) -> Result<BBox> {
+pub fn reproject_bbox_to_wgs84(src_epsg: u32, bounds: [f64; 4]) -> Result<BBox> {
     if src_epsg == 4326 {
         return BBox::from_array(bounds);
     }

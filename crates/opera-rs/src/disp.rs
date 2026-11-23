@@ -4,7 +4,9 @@
 //! Adapted in pure Rust from `opera-adt/opera-utils` (`disp/_product.py`, `disp/_search.py`,
 //! `disp/_enums.py`) with zero GDAL, h5py, or Earthdata login requirements for CMR discovery.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(feature = "http")]
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -254,6 +256,7 @@ impl DispProduct {
     /// Constructs a [`DispProduct`] from a CMR UMM-G `umm` JSON object.
     pub fn from_umm(umm: &Value, url_type: UrlType) -> Result<Self> {
         let mut https_url: Option<String> = None;
+        let mut https_fallback: Option<String> = None;
         let mut s3_url: Option<String> = None;
 
         if let Some(urls) = umm.get("RelatedUrls").and_then(Value::as_array) {
@@ -268,14 +271,16 @@ impl DispProduct {
                 }
                 if u.starts_with("s3://") && s3_url.is_none() {
                     s3_url = Some(u.to_string());
-                } else if u.starts_with("https://")
-                    && (rtype == "GET DATA" || rtype.is_empty() || https_url.is_none())
-                    && https_url.is_none()
-                {
-                    https_url = Some(u.to_string());
+                } else if u.starts_with("https://") {
+                    if (rtype == "GET DATA" || rtype.is_empty()) && https_url.is_none() {
+                        https_url = Some(u.to_string());
+                    } else if https_fallback.is_none() {
+                        https_fallback = Some(u.to_string());
+                    }
                 }
             }
         }
+        let https_url = https_url.or(https_fallback);
 
         let granule_ur = umm
             .get("GranuleUR")
@@ -526,6 +531,11 @@ fn build_disp_cmr_url(params: &DispSearchParams, page_size: usize) -> Result<Str
 /// Queries public NASA CMR for `OPERA_L3_DISP-S1_V1` granules matching `params` (no Earthdata login required).
 #[cfg(feature = "http")]
 pub fn search_disp_products(params: &DispSearchParams) -> Result<DispSearchResult> {
+    if params.frame_id.is_none() && params.bbox.is_none() {
+        return Err(OperaError::InvalidInput(
+            "specify at least one of frame_id or bbox for DISP-S1 search".into(),
+        ));
+    }
     let limit = params.limit.clamp(1, 2000);
     let page_size = limit.min(500);
     let start_iso = normalize_date_bound(params.start.as_deref(), false)?;
@@ -718,5 +728,8 @@ mod tests {
         )
         .unwrap();
         assert!(DispProductStack::new(vec![p_https, other]).is_err());
+
+        #[cfg(feature = "http")]
+        assert!(search_disp_products(&DispSearchParams::default()).is_err());
     }
 }

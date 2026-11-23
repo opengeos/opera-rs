@@ -12,9 +12,9 @@ use opera_rs::analysis::{
     fetch_time_series_candidates,
 };
 use opera_rs::burst_db::{
-    frame_ids_from_geojson, get_frame_bbox, get_frame_geojson, get_frame_ids_for_burst,
+    FrameBBox, frame_ids_from_geojson, get_frame_bbox, get_frame_geojson, get_frame_ids_for_burst,
     get_frame_orbit_pass, get_frame_to_burst_mapping, get_intersecting_frames,
-    get_intersecting_frames_for_point,
+    get_intersecting_frames_for_point, reproject_bbox_to_wgs84,
 };
 use opera_rs::bursts::{get_dates, group_by_burst, parse_burst_id};
 use opera_rs::cmr::{CmrSearchParams, resolve_aoi_layer, resolve_concept_id, search_granules};
@@ -576,9 +576,12 @@ pub enum Commands {
         /// Print only constituent normalized burst IDs (one per line or JSON array).
         #[arg(long)]
         burst_ids_only: bool,
-        /// Optional path to a local burst_db JSON/ZIP file (skips remote download).
+        /// Optional path to a local frame-to-burst (or burst-to-frame with --from-burst) JSON/ZIP file.
         #[arg(long, value_name = "FILE")]
         db_file: Option<PathBuf>,
+        /// Optional path to a local frame-geometries-simple GeoJSON/ZIP file (used for orbit pass and -o export).
+        #[arg(long, value_name = "FILE")]
+        geom_file: Option<PathBuf>,
         /// Optional output file (.geojson, .gpkg, .shp) to export the frame geometry.
         #[arg(short, long, value_name = "FILE")]
         output: Option<PathBuf>,
@@ -1769,6 +1772,7 @@ fn dispatch(command: Commands) -> Result<()> {
             bounds_only,
             burst_ids_only,
             db_file,
+            geom_file,
             output,
             json: as_json,
         } => {
@@ -1811,14 +1815,37 @@ fn dispatch(command: Commands) -> Result<()> {
                 return Ok(());
             }
 
-            if db_file.is_none()
-                && let Ok(pass) = get_frame_orbit_pass(frame_id, None)
+            // Compute requested bbox once and propagate WGS 84 reprojection errors consistently
+            // across both JSON and text output modes.
+            let fb = if latlon {
+                let wgs = match info.bbox_wgs84 {
+                    Some(b) => b,
+                    None => reproject_bbox_to_wgs84(
+                        info.epsg,
+                        [info.xmin, info.ymin, info.xmax, info.ymax],
+                    )?,
+                };
+                FrameBBox {
+                    frame_id,
+                    epsg: 4326,
+                    bbox: wgs.to_array(),
+                }
+            } else {
+                FrameBBox {
+                    frame_id,
+                    epsg: info.epsg,
+                    bbox: [info.xmin, info.ymin, info.xmax, info.ymax],
+                }
+            };
+
+            if (geom_file.is_some() || db_file.is_none())
+                && let Ok(pass) = get_frame_orbit_pass(frame_id, geom_file.as_deref())
             {
                 info.orbit_pass = Some(pass);
             }
 
             let written = if let Some(out_path) = output {
-                let fc = get_frame_geojson(Some(&[frame_id]), None)?;
+                let fc = get_frame_geojson(Some(&[frame_id]), geom_file.as_deref())?;
                 let count = write_feature_collection(&fc, &out_path, "disp_frame")?;
                 Some((out_path, count))
             } else {
@@ -1827,18 +1854,13 @@ fn dispatch(command: Commands) -> Result<()> {
 
             if as_json {
                 let mut val = serde_json::to_value(&info)?;
-                if latlon && let Some(wgs) = info.bbox_wgs84 {
-                    val["epsg"] = json!(4326);
-                    val["bbox"] = json!(wgs.to_array());
-                } else {
-                    val["bbox"] = json!([info.xmin, info.ymin, info.xmax, info.ymax]);
-                }
+                val["epsg"] = json!(fb.epsg);
+                val["bbox"] = json!(fb.bbox);
                 if let Some((ref p, count)) = written {
                     val["written"] = json!({ "path": p, "features": count });
                 }
                 print_json(&val)?;
             } else {
-                let fb = get_frame_bbox(frame_id, latlon, db_file.as_deref())?;
                 println!(
                     "Frame {} | EPSG:{} | bbox={:?} | land={} | north_america={} | bursts={}",
                     info.frame_id,
@@ -1867,21 +1889,21 @@ fn dispatch(command: Commands) -> Result<()> {
             output,
             json: as_json,
         } => {
-            let fc = match (lon, lat, aoi.resolve()?) {
-                (Some(_), Some(_), Some(_)) => {
-                    return Err(OperaError::InvalidInput(
-                        "specify either --lon/--lat or --bbox/--place/--aoi-file, not both".into(),
-                    ));
-                }
-                (Some(x), Some(y), None) => {
-                    get_intersecting_frames_for_point(x, y, db_file.as_deref())?
-                }
-                (None, None, Some((b, _))) => get_intersecting_frames(b, db_file.as_deref())?,
-                _ => {
-                    return Err(OperaError::InvalidInput(
-                        "specify an AOI with --bbox, --place, --aoi-file, or --lon/--lat".into(),
-                    ));
-                }
+            let has_point = lon.is_some() || lat.is_some();
+            let has_aoi = aoi.bbox.is_some() || aoi.place.is_some() || aoi.aoi_file.is_some();
+            if has_point && has_aoi {
+                return Err(OperaError::InvalidInput(
+                    "specify either --lon/--lat or --bbox/--place/--aoi-file, not both".into(),
+                ));
+            }
+            let fc = if let (Some(x), Some(y)) = (lon, lat) {
+                get_intersecting_frames_for_point(x, y, db_file.as_deref())?
+            } else if let Some((b, _)) = aoi.resolve()? {
+                get_intersecting_frames(b, db_file.as_deref())?
+            } else {
+                return Err(OperaError::InvalidInput(
+                    "specify an AOI with --bbox, --place, --aoi-file, or --lon/--lat".into(),
+                ));
             };
             let ids = frame_ids_from_geojson(&fc);
             let written = if let Some(out_path) = output {
@@ -2011,6 +2033,11 @@ fn dispatch(command: Commands) -> Result<()> {
         } => {
             let parsed_url_type: UrlType = url_type.parse()?;
             let resolved_bbox = aoi.resolve()?.map(|(b, _)| b);
+            if frame_id.is_none() && resolved_bbox.is_none() {
+                return Err(OperaError::InvalidInput(
+                    "specify --frame-id or an AOI (--bbox, --place, or --aoi-file)".into(),
+                ));
+            }
             let version_filter = if product_version.trim().is_empty() {
                 None
             } else {

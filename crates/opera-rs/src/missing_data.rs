@@ -12,9 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::bursts::{
-    filter_by_burst_id, filter_by_date, get_burst_id, get_dates, normalize_burst_id,
-};
+use crate::bursts::{get_burst_id, get_dates, normalize_burst_id};
 use crate::error::{OperaError, Result};
 use crate::types::CalendarDate;
 
@@ -242,14 +240,29 @@ pub fn get_missing_data_options(slc_files: &[String]) -> Result<Vec<BurstSubsetO
     let (burst_ids, dates, incidence) = get_burst_id_date_incidence(&burst_map);
     let mut options = generate_burst_subset_options(&incidence, &burst_ids, &dates);
 
+    // Pre-parse each file's (normalized burst_id, first acquisition date) once so input selection
+    // matches `get_burst_id_to_dates` and never triggers on generation/reference dates.
+    let parsed_files: Vec<(String, CalendarDate, &String)> = slc_files
+        .iter()
+        .filter_map(|f| {
+            let burst = get_burst_id(f).ok()?;
+            let acq_date = *get_dates(f).first()?;
+            Some((burst, acq_date, f))
+        })
+        .collect();
+
     for opt in &mut options {
-        let parsed_dates: Vec<CalendarDate> = opt
+        let allowed_dates: BTreeSet<CalendarDate> = opt
             .dates
             .iter()
             .filter_map(|d| CalendarDate::parse(d).ok())
             .collect();
-        let valid_date_files = filter_by_date(slc_files, &parsed_dates);
-        opt.inputs = filter_by_burst_id(&valid_date_files, &opt.burst_ids);
+        let allowed_bursts: BTreeSet<&str> = opt.burst_ids.iter().map(String::as_str).collect();
+        opt.inputs = parsed_files
+            .iter()
+            .filter(|(b, d, _)| allowed_dates.contains(d) && allowed_bursts.contains(b.as_str()))
+            .map(|(_, _, f)| (*f).clone())
+            .collect();
     }
     Ok(options)
 }
@@ -317,5 +330,30 @@ mod tests {
             "T087-185683-IW1_20230101.h5".into(),
         ];
         assert!(get_missing_data_options(&files).is_err());
+    }
+
+    #[test]
+    fn option_inputs_match_acquisition_date_not_generation_date() {
+        // Burst 2 was acquired on 2023-02-01 (excluded) but generated on 2023-01-01 (selected).
+        let files = vec![
+            "OPERA_L2_CSLC-S1_T087-185683-IW1_20230101T161649Z_20240504T185235Z_S1A_VV_v1.1.h5"
+                .into(),
+            "OPERA_L2_CSLC-S1_T087-185683-IW2_20230101T161649Z_20240504T185235Z_S1A_VV_v1.1.h5"
+                .into(),
+            "OPERA_L2_CSLC-S1_T087-185683-IW2_20230201T161649Z_20230101T185235Z_S1A_VV_v1.1.h5"
+                .into(),
+        ];
+        let opts = get_missing_data_options(&files).unwrap();
+        let opt_two_bursts = opts
+            .iter()
+            .find(|o| o.num_burst_ids == 2 && o.num_dates == 1)
+            .expect("2x1 subset");
+        assert_eq!(opt_two_bursts.inputs.len(), 2);
+        assert!(
+            opt_two_bursts
+                .inputs
+                .iter()
+                .all(|f| !f.contains("20230201T161649Z"))
+        );
     }
 }
