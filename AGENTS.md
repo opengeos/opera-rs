@@ -5,7 +5,7 @@
 `opera-rs` is a pure-Rust, agent-centric library, CLI, MCP server, and Python package for searching, visualizing, and analyzing [NASA OPERA](https://www.jpl.nasa.gov/go/opera) satellite products (DSWx-HLS, DSWx-S1, DIST-ALERT, DIST-ANN, RTC-S1, CSLC-S1, DISP-S1) via NASA CMR and `titiler-cmr`, with zero GDAL or C/C++ dependencies.
 
 - Put all core catalog, CMR search, geocoding, `titiler-cmr` client, analysis, vectorization, and rendering logic in `crates/opera-rs` (published to crates.io as `opera-rs`). Keep `crates/opera-cli` and `python/` thin wrappers.
-- Keep default builds 100% pure Rust with zero GDAL or C/C++ dependencies. Network transport (`ureq` with `rustls`) lives behind the `http` feature (enabled by default) so offline/WASM builds (`--no-default-features`) compile cleanly without HTTP dependencies.
+- Keep zero GDAL dependencies across all builds. `--no-default-features` is 100% pure Rust with zero C/C++ dependencies; the `http` feature (enabled by default for live CMR/`titiler-cmr`/Nominatim HTTPS transport) pulls `ureq` with `rustls`/`ring` (which builds `ring`'s C/assembly crypto primitives) while still requiring zero GDAL dependencies.
 - Expose CLI subcommands consistently across `--json`, `--json-usage`, and `opera mcp` (which automatically registers every CLI subcommand except `mcp` and `help`).
 - Keep `python/LICENSE` and `python/NOTICE` synchronized with root `LICENSE` and `NOTICE` so wheel and sdist builds pass license verification.
 - `python/` is excluded from the root Cargo workspace so pure-Rust builds never require `libpython`. Minimum supported Python is **3.11** (`requires-python = ">=3.11"`, `abi3-py311`).
