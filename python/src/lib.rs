@@ -130,14 +130,27 @@ fn tile_urls_json(
     }
     let parsed_backend: TitilerBackend = backend.parse().map_err(to_py_err)?;
     let ep = resolve_titiler_endpoint(endpoint).map_err(to_py_err)?;
-    let chosen_bands = bands.unwrap_or_default();
+    let prod_info = product.and_then(|p| find_product(p).ok());
+    let prod_name = prod_info
+        .as_ref()
+        .map(|p| p.short_name.as_str())
+        .or(product);
+    let chosen_bands = match bands {
+        Some(b) if !b.is_empty() => b,
+        _ if parsed_backend == TitilerBackend::Rasterio => prod_info
+            .as_ref()
+            .and_then(|p| p.default_bands.first().cloned())
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    };
     let chosen_variables = variables.unwrap_or_default();
     if parsed_backend == TitilerBackend::Xarray && !chosen_bands.is_empty() {
         return Err(PyValueError::new_err(
             "backend='xarray' uses variables=... rather than bands=...",
         ));
     }
-    let style = product
+    let style = prod_name
         .map(|p| {
             LayerStyle::for_request(
                 p,
@@ -156,7 +169,7 @@ fn tile_urls_json(
     let mut query = TitilerQuery::rasterio(concept_id);
     query.endpoint = ep;
     query.backend = parsed_backend;
-    query.product = product.map(ToString::to_string);
+    query.product = prod_name.map(ToString::to_string);
     query.granule_ur = granule_ur;
     query.temporal = temporal;
     query.assets = chosen_bands;

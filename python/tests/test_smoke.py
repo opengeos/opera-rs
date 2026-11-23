@@ -41,6 +41,13 @@ def test_offline_tile_urls_and_vector_io(tmp_path: Path) -> None:
     assert "WebMercatorQuad/tilejson.json" in urls["tilejson_url"]
     assert "{z}/{x}/{y}.png" in urls["tile_url_template"]
 
+    default_band_urls = opera_rs.tile_urls(
+        "C2617126679-POCLOUD",
+        product="dswx-hls",
+    )
+    assert "assets=B01_WTR" in default_band_urls["tilejson_url"]
+    assert "colormap=" in default_band_urls["tilejson_url"]
+
     fc = {
         "type": "FeatureCollection",
         "features": [
