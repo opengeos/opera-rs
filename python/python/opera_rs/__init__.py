@@ -21,6 +21,13 @@ def _bbox_tuple(bbox: BBoxLike | None) -> tuple[float, float, float, float] | No
     return (vals[0], vals[1], vals[2], vals[3])
 
 
+def _require_bbox(bbox: BBoxLike) -> tuple[float, float, float, float]:
+    resolved = _bbox_tuple(bbox)
+    if resolved is None:
+        raise ValueError("bbox is required")
+    return resolved
+
+
 def products() -> list[dict[str, Any]]:
     """Return metadata for all 9 supported NASA OPERA products."""
     return json.loads(_opera_rs.catalog_json())
@@ -52,11 +59,14 @@ def search(
     deduplicate_versions: bool = True,
     newest_per_tile: bool = False,
     cmr_endpoint: str | None = None,
+    nominatim_endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Search public NASA CMR for OPERA granules, footprints, dates, and bands."""
+    if bbox is not None and place is not None:
+        raise ValueError("specify either bbox or place, not both")
     resolved_bbox = _bbox_tuple(bbox)
     if resolved_bbox is None and place is not None:
-        geo = geocode(place)["bbox"]
+        geo = geocode(place, endpoint=nominatim_endpoint)["bbox"]
         resolved_bbox = (geo["west"], geo["south"], geo["east"], geo["north"])
     return json.loads(
         _opera_rs.search_json(
@@ -166,8 +176,7 @@ def stats(
     endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Compute zonal AOI statistics and 30 m categorical class area breakdowns."""
-    b = _bbox_tuple(bbox)
-    assert b is not None
+    b = _require_bbox(bbox)
     return json.loads(
         _opera_rs.stats_json(
             product,
@@ -197,8 +206,7 @@ def detect_change(
     endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Run two-date OPERA change detection over an AOI."""
-    b = _bbox_tuple(bbox)
-    assert b is not None
+    b = _require_bbox(bbox)
     return json.loads(
         _opera_rs.detect_change_json(
             product, b, before_date, after_date, window_days, band, expression, endpoint
@@ -219,8 +227,7 @@ def analyze_time_series(
     endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Run multi-date OPERA time-series trend analysis over an AOI."""
-    b = _bbox_tuple(bbox)
-    assert b is not None
+    b = _require_bbox(bbox)
     return json.loads(
         _opera_rs.analyze_time_series_json(
             product,
@@ -248,8 +255,7 @@ def derive_flood_extent(
     endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Vectorize observed OPERA DSWx surface-water polygons (OPERA-observed, not QAed)."""
-    b = _bbox_tuple(bbox)
-    assert b is not None
+    b = _require_bbox(bbox)
     return json.loads(
         _opera_rs.derive_flood_extent_json(
             b,
@@ -279,23 +285,20 @@ def preview(
     endpoint: str | None = None,
 ) -> bytes:
     """Render a PNG map preview of an OPERA layer over ``bbox`` and return PNG bytes."""
-    b = _bbox_tuple(bbox)
-    assert b is not None
+    b = _require_bbox(bbox)
     out_str = str(output_path) if output_path is not None else None
-    return bytes(
-        _opera_rs.preview_png(
-            product,
-            b,
-            start,
-            end,
-            band,
-            water_only,
-            max_dim,
-            basemap,
-            title,
-            out_str,
-            endpoint,
-        )
+    return _opera_rs.preview_png(
+        product,
+        b,
+        start,
+        end,
+        band,
+        water_only,
+        max_dim,
+        basemap,
+        title,
+        out_str,
+        endpoint,
     )
 
 

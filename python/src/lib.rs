@@ -20,7 +20,7 @@ use opera_rs::titiler::{
 use opera_rs::types::{BBox, TitilerBackend};
 use opera_rs::viz::{PreviewOptions, render_preview_png};
 use opera_rs::{DEFAULT_TITILER_ENDPOINT, OperaError};
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -115,6 +115,9 @@ fn tile_urls_json(
     endpoint: Option<&str>,
     tile_size: u32,
 ) -> PyResult<String> {
+    if water_only && product.is_none() {
+        return Err(PyValueError::new_err("water_only requires product"));
+    }
     let parsed_backend: TitilerBackend = backend.parse().map_err(to_py_err)?;
     let chosen_bands = bands.unwrap_or_default();
     let style = product
@@ -140,11 +143,7 @@ fn tile_urls_json(
     query.temporal = temporal;
     query.assets = chosen_bands;
     query.expression = expression;
-    query.colormap = style.colormap;
-    query.colormap_name = style.colormap_name;
-    if let Some(r) = style.rescale {
-        query.rescale = vec![r];
-    }
+    query.apply_style(&style);
     to_json_string(&serde_json::json!({
         "tilejson_url": build_tilejson_url(&query),
         "tile_url_template": build_tile_url_template(&query, tile_size),

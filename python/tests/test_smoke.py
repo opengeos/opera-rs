@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 import opera_rs
 
@@ -68,9 +71,20 @@ def test_offline_tile_urls_and_vector_io(tmp_path: Path) -> None:
     assert abs(bbox[3] - 36.3) < 1e-6
 
 
-def test_bundled_cli_and_mcp_server_via_python_module() -> None:
+def test_validation_errors() -> None:
+    with pytest.raises(ValueError, match="water_only requires product"):
+        opera_rs.tile_urls("C2617126679-POCLOUD", water_only=True)
+
+    with pytest.raises(ValueError, match="either bbox or place"):
+        opera_rs.search(bbox=(-119.9, 35.8, -119.4, 36.3), place="Tulare Lake")
+
+    with pytest.raises(ValueError, match="bbox is required"):
+        opera_rs.stats(None)  # type: ignore[arg-type]
+
+
+def test_bundled_cli_and_mcp_server_via_python_module(tmp_path: Path) -> None:
     usage_proc = subprocess.run(
-        [sys.executable, "-m", "opera_rs", "--json-usage"],
+        [sys.executable, "-P", "-m", "opera_rs", "--json-usage"],
         capture_output=True,
         text=True,
         check=True,
@@ -78,29 +92,43 @@ def test_bundled_cli_and_mcp_server_via_python_module() -> None:
     doc = json.loads(usage_proc.stdout)
     assert doc["program"] == "opera"
 
+    # Plant a shadowing opera_rs package in cwd to verify `python -P -m opera_rs` ignores it
+    # when `opera mcp` spawns child tool processes.
+    decoy = tmp_path / "opera_rs"
+    decoy.mkdir()
+    (decoy / "__init__.py").write_text("raise RuntimeError('shadowed opera_rs imported')\n")
+
     mcp_proc = subprocess.Popen(
-        [sys.executable, "-m", "opera_rs", "mcp"],
+        [sys.executable, "-P", "-m", "opera_rs", "mcp"],
+        cwd=tmp_path,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
     assert mcp_proc.stdin is not None and mcp_proc.stdout is not None
-    mcp_proc.stdin.write(
-        json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {"name": "products", "arguments": {"args": ["--json"]}},
-            }
+    try:
+        mcp_proc.stdin.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "products", "arguments": {"args": ["--json"]}},
+                }
+            )
+            + "\n"
         )
-        + "\n"
-    )
-    mcp_proc.stdin.flush()
-    reply_line = mcp_proc.stdout.readline()
-    mcp_proc.stdin.close()
-    mcp_proc.wait(timeout=15)
+        mcp_proc.stdin.flush()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            reply_line = pool.submit(mcp_proc.stdout.readline).result(timeout=30)
+        mcp_proc.stdin.close()
+        mcp_proc.wait(timeout=15)
+    except Exception:
+        mcp_proc.kill()
+        mcp_proc.wait(timeout=5)
+        raise
+
     assert mcp_proc.returncode == 0
     reply = json.loads(reply_line)
     assert reply["result"]["isError"] is False
