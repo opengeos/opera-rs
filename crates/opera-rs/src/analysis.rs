@@ -115,28 +115,37 @@ impl ChangeDetectionResult {
             self.after.acquired_date, self.after.granule_id
         ));
 
-        if let (Some(b_ow), Some(a_ow), Some(d_ow)) = (
-            self.before.open_water_km2,
-            self.after.open_water_km2,
-            self.open_water_delta_km2,
-        ) {
+        let has_open_water = self.before.open_water_km2.is_some()
+            && self.after.open_water_km2.is_some()
+            && self.open_water_delta_km2.is_some();
+        let has_total_water = self.before.total_water_km2.is_some()
+            && self.after.total_water_km2.is_some()
+            && self.total_water_delta_km2.is_some();
+
+        if has_open_water || has_total_water {
             md.push_str("## Surface Water Summary\n\n");
-            md.push_str(&format!(
-                "- **Open water (class 1):** {:.3} km^2 -> {:.3} km^2 (delta: {:+.3} km^2{})\n",
-                b_ow,
-                a_ow,
-                d_ow,
-                self.open_water_percent_change
-                    .map(|p| format!(", {:+.1}%", p))
-                    .unwrap_or_default()
-            ));
+            if let (Some(b_ow), Some(a_ow), Some(d_ow)) = (
+                self.before.open_water_km2,
+                self.after.open_water_km2,
+                self.open_water_delta_km2,
+            ) {
+                md.push_str(&format!(
+                    "- **Open water (class 1):** {:.3} km^2 -> {:.3} km^2 (delta: {:+.3} km^2{})\n",
+                    b_ow,
+                    a_ow,
+                    d_ow,
+                    self.open_water_percent_change
+                        .map(|p| format!(", {:+.1}%", p))
+                        .unwrap_or_default()
+                ));
+            }
             if let (Some(b_tw), Some(a_tw), Some(d_tw)) = (
                 self.before.total_water_km2,
                 self.after.total_water_km2,
                 self.total_water_delta_km2,
             ) {
                 md.push_str(&format!(
-                    "- **Total surface water (classes 1+2):** {:.3} km^2 -> {:.3} km^2 (delta: {:+.3} km^2{})\n\n",
+                    "- **Total surface water:** {:.3} km^2 -> {:.3} km^2 (delta: {:+.3} km^2{})\n",
                     b_tw,
                     a_tw,
                     d_tw,
@@ -145,6 +154,7 @@ impl ChangeDetectionResult {
                         .unwrap_or_default()
                 ));
             }
+            md.push('\n');
         }
 
         if !self.class_deltas.is_empty() {
@@ -184,6 +194,12 @@ impl ChangeDetectionResult {
                     a,
                     a - b
                 ));
+            }
+        }
+        if !self.warnings.is_empty() {
+            md.push_str("\n## Warnings\n\n");
+            for w in &self.warnings {
+                md.push_str(&format!("- {w}\n"));
             }
         }
         md
@@ -653,7 +669,7 @@ pub fn compute_series_trend(metric: &str, points: &[(f64, f64)]) -> Option<Serie
 /// Retrieves candidate granules across `start..=end`, falling back to evenly spaced sub-windows
 /// when CMR reports more than 500 hits so early acquisitions are not truncated.
 ///
-/// Returns `(concept_id, candidate_granules)`.
+/// Returns `(concept_id, candidate_granules, warnings)`.
 #[cfg(feature = "http")]
 pub fn fetch_time_series_candidates(
     product: &str,
@@ -662,7 +678,7 @@ pub fn fetch_time_series_candidates(
     end: &str,
     target_samples: usize,
     cmr_endpoint: Option<&str>,
-) -> Result<(Option<String>, Vec<OperaGranule>)> {
+) -> Result<(Option<String>, Vec<OperaGranule>, Vec<String>)> {
     let prod = find_product(product)?;
     let start_date = CalendarDate::parse(start)?;
     let end_date = CalendarDate::parse(end)?;
@@ -683,10 +699,13 @@ pub fn fetch_time_series_candidates(
     })?;
     let mut concept_id = search.concept_id.clone();
     let mut candidate_granules = Vec::new();
+    let mut warnings = Vec::new();
     if search.hits > 500 && target_samples > 1 {
         let total_days = end_date.days_between(start_date).max(1);
         let buckets = target_samples.clamp(2, 24) as i64;
         let step = (total_days / buckets).max(1);
+        let mut failed_buckets = 0i64;
+        let mut first_err: Option<String> = None;
         for i in 0..buckets {
             let b_start = start_date.add_days(i * step);
             let b_end = if i == buckets - 1 {
@@ -694,7 +713,7 @@ pub fn fetch_time_series_candidates(
             } else {
                 start_date.add_days(((i + 1) * step - 1).min(total_days))
             };
-            if let Ok(sub) = search_granules_sorted(
+            match search_granules_sorted(
                 &CmrSearchParams {
                     product: prod.short_name.clone(),
                     bbox: Some(bbox),
@@ -707,16 +726,40 @@ pub fn fetch_time_series_candidates(
                 },
                 true,
             ) {
-                if concept_id.is_none() {
-                    concept_id = sub.concept_id;
+                Ok(sub) => {
+                    if concept_id.is_none() {
+                        concept_id = sub.concept_id;
+                    }
+                    candidate_granules.extend(sub.granules);
                 }
-                candidate_granules.extend(sub.granules);
+                Err(err) => {
+                    failed_buckets += 1;
+                    if first_err.is_none() {
+                        first_err = Some(err.to_string());
+                    }
+                }
             }
+        }
+        if failed_buckets == buckets {
+            return Err(OperaError::Http(format!(
+                "all {buckets} CMR sub-window searches failed{}",
+                first_err
+                    .map(|e| format!(" (first error: {e})"))
+                    .unwrap_or_default()
+            )));
+        }
+        if failed_buckets > 0 {
+            warnings.push(format!(
+                "{failed_buckets} of {buckets} CMR sub-window searches failed{}; temporal coverage may be incomplete",
+                first_err
+                    .map(|e| format!(" (first error: {e})"))
+                    .unwrap_or_default()
+            ));
         }
     } else {
         candidate_granules = search.granules;
     }
-    Ok((concept_id, candidate_granules))
+    Ok((concept_id, candidate_granules, warnings))
 }
 
 #[cfg(not(feature = "http"))]
@@ -727,7 +770,7 @@ pub fn fetch_time_series_candidates(
     _end: &str,
     _target_samples: usize,
     _cmr_endpoint: Option<&str>,
-) -> Result<(Option<String>, Vec<OperaGranule>)> {
+) -> Result<(Option<String>, Vec<OperaGranule>, Vec<String>)> {
     Err(OperaError::HttpDisabled)
 }
 
@@ -746,7 +789,7 @@ pub fn analyze_time_series(opts: &TimeSeriesOptions) -> Result<TimeSeriesResult>
         .clone()
         .unwrap_or_else(|| opts.bbox.to_geojson_feature());
 
-    let (concept_id, candidate_granules) = fetch_time_series_candidates(
+    let (concept_id, candidate_granules, mut warnings) = fetch_time_series_candidates(
         &prod.short_name,
         opts.bbox,
         &opts.start,
@@ -778,7 +821,6 @@ pub fn analyze_time_series(opts: &TimeSeriesOptions) -> Result<TimeSeriesResult>
         }
     }
     let multi_tile_dates = tiles_per_date.values().filter(|s| s.len() > 1).count();
-    let mut warnings = Vec::new();
     if multi_tile_dates > 0 {
         warnings.push(format!(
             "{multi_tile_dates} acquisition date(s) span multiple tiles/bursts in the AOI; each observation evaluates one representative granule per date"

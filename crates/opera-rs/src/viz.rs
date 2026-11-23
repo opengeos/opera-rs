@@ -358,6 +358,14 @@ pub fn stitch_tile_templates(
         layers.push((false, tpl.clone()));
     }
 
+    const MAX_PREVIEW_TILE_REQUESTS: usize = 1024;
+    let total_requests = cols.saturating_mul(rows).saturating_mul(layers.len());
+    if total_requests > MAX_PREVIEW_TILE_REQUESTS {
+        return Err(OperaError::InvalidInput(format!(
+            "preview requires {total_requests} tile requests, exceeding the cap of {MAX_PREVIEW_TILE_REQUESTS}; reduce max_tiles_across or granule count"
+        )));
+    }
+
     let mut opera_succeeded = 0usize;
     let mut opera_failed = 0usize;
     let mut first_opera_error: Option<String> = None;
