@@ -121,3 +121,37 @@ fn cli_json_usage_returns_valid_schema() {
             .any(|c| c["name"] == "flood-extent")
     );
 }
+
+#[test]
+fn mcp_server_completes_piped_tool_call_before_eof_exit() {
+    let mut child = Command::new(opera_bin())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn opera mcp");
+
+    {
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "tools/call",
+                "params": {"name": "products", "arguments": {"args": ["--json"]}}
+            })
+        )
+        .expect("write piped request");
+        // Immediately drop stdin to send EOF while tools/call is in flight.
+    }
+
+    let output = child.wait_with_output().expect("wait opera mcp");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let reply: Value = serde_json::from_str(stdout.trim()).expect("reply JSON");
+    assert_eq!(reply["id"], 99);
+    assert_eq!(reply["result"]["isError"], false);
+}
