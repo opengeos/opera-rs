@@ -1436,6 +1436,7 @@ fn dispatch(command: Commands) -> Result<()> {
                     "dates": dates,
                     "bytes": gif_bytes.len(),
                     "output": output.display().to_string(),
+                    "warnings": warnings,
                 }))?;
             } else {
                 println!(

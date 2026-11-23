@@ -112,6 +112,8 @@ pub fn write_feature_collection(
                     Value::Null => None,
                     Value::Bool(_) => Some(FieldType::Boolean),
                     Value::Number(n) if n.is_i64() => Some(FieldType::Integer),
+                    // Unsigned integers > i64::MAX cannot fit in i64 or losslessly in f64.
+                    Value::Number(n) if n.is_u64() => Some(FieldType::Text),
                     Value::Number(_) => Some(FieldType::Float),
                     _ => Some(FieldType::Text),
                 };
@@ -124,6 +126,21 @@ pub fn write_feature_collection(
                         Some(FieldType::Float) if ft == FieldType::Integer => FieldType::Float,
                         Some(_) => FieldType::Text,
                     });
+                }
+            }
+        }
+    }
+    // If a field was promoted from Integer to Float, ensure no integer loses precision (> 2^53).
+    const MAX_EXACT_F64_INT: i64 = 1i64 << 53;
+    for feat in feats {
+        if let Some(props) = feat.get("properties").and_then(Value::as_object) {
+            for (k, v) in props {
+                if field_types.get(k).copied().flatten() == Some(FieldType::Float)
+                    && let Value::Number(n) = v
+                    && let Some(i) = n.as_i64()
+                    && i.abs() > MAX_EXACT_F64_INT
+                {
+                    field_types.insert(k.clone(), Some(FieldType::Text));
                 }
             }
         }

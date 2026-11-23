@@ -572,7 +572,16 @@ pub(crate) fn parse_umm_granule(item: &UmmGranuleItem, product: &str) -> Option<
     let date_ref = begin_date.as_deref().unwrap_or("");
     let date = date_ref.get(..10).unwrap_or("").to_string();
     let time = date_ref.get(11..16).unwrap_or("").to_string();
-    let tile = id.split('_').nth(3).unwrap_or("").to_string();
+    let parts: Vec<&str> = id.split('_').collect();
+    // DISP-S1 URs take the form `OPERA_L3_DISP-S1_IW_F<frame>_...`, so frame ID is at index 4.
+    let tile = if parts.get(3).copied() == Some("IW")
+        && parts.get(4).is_some_and(|p| p.starts_with('F'))
+    {
+        parts[4]
+    } else {
+        parts.get(3).copied().unwrap_or("")
+    }
+    .to_string();
 
     let (rings, holes) =
         parse_rings_and_holes(&item.umm.spatial_extent.horizontal_spatial_domain.geometry);
@@ -873,15 +882,15 @@ pub fn resolve_aoi_layer(
                 prod.short_name
             ))
         })?;
-    let latest_date = search.dates.first().cloned();
-    let granules = search.granules.into_iter().take(cap).collect();
+    let granules: Vec<OperaGranule> = search.granules.into_iter().take(cap).collect();
+    let capped = assemble_search_result(&prod.short_name, granules.len() as u64, granules);
     Ok(ResolvedAoiLayer {
         product: prod,
         concept_id: cid,
-        granules,
+        granules: capped.granules,
         band: chosen_band,
-        latest_date,
-        feature_collection: search.feature_collection,
+        latest_date: capped.dates.first().cloned(),
+        feature_collection: capped.feature_collection,
     })
 }
 
