@@ -96,6 +96,17 @@ def test_validation_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     assert custom_urls["tilejson_url"].startswith("https://custom-titiler.example.org/")
     assert "rescale=" not in custom_urls["tilejson_url"]
 
+    xarray_urls = opera_rs.tile_urls(
+        "C3294057315-ASF",
+        backend="xarray",
+        variables=["displacement"],
+        group="/",
+    )
+    assert "/xarray/WebMercatorQuad/tilejson.json" in xarray_urls["tilejson_url"]
+    assert "variables=displacement" in xarray_urls["tilejson_url"]
+    with pytest.raises(ValueError, match="variables="):
+        opera_rs.tile_urls("C3294057315-ASF", backend="xarray", bands=["VV"])
+
 
 def test_bundled_cli_and_mcp_server_via_python_module(tmp_path: Path) -> None:
     usage_proc = subprocess.run(

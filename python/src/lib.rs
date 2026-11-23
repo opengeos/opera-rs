@@ -108,7 +108,7 @@ fn search_json(
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (concept_id, product=None, backend="rasterio", granule_ur=None, temporal=None, bands=None, rescale=None, colormap=None, water_only=false, expression=None, endpoint=None, tile_size=512))]
+#[pyo3(signature = (concept_id, product=None, backend="rasterio", granule_ur=None, temporal=None, bands=None, variables=None, group=None, rescale=None, colormap=None, water_only=false, expression=None, endpoint=None, tile_size=512))]
 fn tile_urls_json(
     concept_id: &str,
     product: Option<&str>,
@@ -116,6 +116,8 @@ fn tile_urls_json(
     granule_ur: Option<String>,
     temporal: Option<String>,
     bands: Option<Vec<String>>,
+    variables: Option<Vec<String>>,
+    group: Option<String>,
     rescale: Option<&str>,
     colormap: Option<&str>,
     water_only: bool,
@@ -129,6 +131,12 @@ fn tile_urls_json(
     let parsed_backend: TitilerBackend = backend.parse().map_err(to_py_err)?;
     let ep = resolve_titiler_endpoint(endpoint).map_err(to_py_err)?;
     let chosen_bands = bands.unwrap_or_default();
+    let chosen_variables = variables.unwrap_or_default();
+    if parsed_backend == TitilerBackend::Xarray && !chosen_bands.is_empty() {
+        return Err(PyValueError::new_err(
+            "backend='xarray' uses variables=... rather than bands=...",
+        ));
+    }
     let style = product
         .map(|p| {
             LayerStyle::for_request(
@@ -152,6 +160,8 @@ fn tile_urls_json(
     query.granule_ur = granule_ur;
     query.temporal = temporal;
     query.assets = chosen_bands;
+    query.variables = chosen_variables;
+    query.group = group;
     query.expression = expression;
     query.apply_style(&style);
     to_json_string(&serde_json::json!({
@@ -258,9 +268,14 @@ fn stats_json(
             );
             let mut q = TitilerQuery::rasterio(&cid);
             q.endpoint = ep;
+            q.backend = prod.backend;
             q.product = Some(prod.short_name);
             q.granule_ur = ur;
-            q.assets = vec![chosen_band];
+            if prod.backend == TitilerBackend::Xarray {
+                q.variables = vec![chosen_band];
+            } else {
+                q.assets = vec![chosen_band];
+            }
             q.expression = expression;
             fetch_bbox_statistics(&q, parsed_bbox, is_cat, histogram_bins)
         })
