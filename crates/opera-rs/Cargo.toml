@@ -1,0 +1,15 @@
+[package]
+name = "opera-rs"
+description = "Pure-Rust library for searching, visualizing, and analyzing NASA OPERA satellite products via NASA CMR and titiler-cmr"
+readme = "../../README.md"
+keywords = ["gis", "nasa", "opera", "remote-sensing", "satellite"]
+categories = ["science::geo", "api-bindings"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = []

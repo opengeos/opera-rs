@@ -1,0 +1,52 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "opera-rs"
+dynamic = ["version"]
+description = "Pure-Rust, agent-centric toolkit for searching, visualizing, and analyzing NASA OPERA satellite data (with CLI and MCP server)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+authors = [
+    { name = "Qiusheng Wu", email = "giswqs@gmail.com" },
+]
+keywords = ["GIS", "NASA", "OPERA", "remote-sensing", "satellite", "MCP", "rust"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+opera = "opera_rs.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/opengeos/opera-rs"
+Repository = "https://github.com/opengeos/opera-rs"
+Issues = "https://github.com/opengeos/opera-rs/issues"
+
+[tool.maturin]
+module-name = "opera_rs._opera_rs"
+python-source = "python"
+manifest-path = "Cargo.toml"
+include = [
+    { path = "LICENSE", format = "sdist" },
+    { path = "NOTICE", format = "sdist" },
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"

@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/opera-rs", "crates/opera-cli"]
+exclude = ["python"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.90"
+repository = "https://github.com/opengeos/opera-rs"
+authors = ["Qiusheng Wu <giswqs@gmail.com>"]
+
+[workspace.dependencies]
+opera-rs = { path = "crates/opera-rs", version = "0.1.0" }
+clap = { version = "4", features = ["derive"] }

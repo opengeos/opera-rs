@@ -1,0 +1,24 @@
+[package]
+name = "opera-cli"
+description = "Command-line interface and Model Context Protocol (MCP) server for searching, visualizing, and analyzing NASA OPERA satellite data"
+readme = "../../README.md"
+keywords = ["gis", "nasa", "opera", "mcp", "cli"]
+categories = ["science::geo", "command-line-utilities"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "opera_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "opera"
+path = "src/main.rs"
+
+[dependencies]
+opera-rs.workspace = true
+clap.workspace = true
