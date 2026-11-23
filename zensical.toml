@@ -10,6 +10,7 @@ copyright = "opera-rs is released under the MIT License. See <a href=\"https://g
 nav = [
   { "Home" = "index.md" },
   { "Installation" = "installation.md" },
+  { "Notebooks" = "notebooks.md" },
   { "CLI Reference" = "cli.md" },
   { "AI Agents (MCP)" = "mcp.md" },
   { "Rust Library" = "rust.md" },

@@ -2,13 +2,14 @@
 
 [![CI](https://github.com/opengeos/opera-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/opengeos/opera-rs/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/opera-rs.svg)](https://crates.io/crates/opera-rs)
-[![PyPI](https://img.shields.io/pypi/v/opera-rs)](https://pypi.org/project/opera-rs/)
+[![PyPI](https://img.shields.io/pypi/v/opera-rs.svg)](https://pypi.org/project/opera-rs/)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/opengeos/opera-rs/blob/main/examples/opera_rs_demo.ipynb)
 [![Docs](https://img.shields.io/badge/docs-opera--rs.opengeos.org-teal.svg)](https://opera-rs.opengeos.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Pure-Rust, agent-centric toolkit for searching, visualizing, and analyzing [NASA OPERA](https://www.jpl.nasa.gov/go/opera) satellite products (DSWx-HLS, DSWx-S1, DIST-ALERT, DIST-ANN, RTC-S1, CSLC-S1, DISP-S1), powered by [`terrio`](https://github.com/opengeos/terrio), NASA's public CMR API, and [`titiler-cmr`](https://github.com/developmentseed/titiler-cmr) with **zero GDAL dependencies** (`--no-default-features` has zero C/C++ dependencies) and **no Earthdata login required**.
 
-**Documentation:** [Installation](https://opera-rs.opengeos.org/installation/) | [CLI](https://opera-rs.opengeos.org/cli/) | [AI Agents (MCP)](https://opera-rs.opengeos.org/mcp/) | [Rust](https://opera-rs.opengeos.org/rust/) | [Python](https://opera-rs.opengeos.org/python/)
+**Documentation:** [Installation](https://opera-rs.opengeos.org/installation/) | [Notebooks](https://opera-rs.opengeos.org/notebooks/) | [CLI](https://opera-rs.opengeos.org/cli/) | [AI Agents (MCP)](https://opera-rs.opengeos.org/mcp/) | [Rust](https://opera-rs.opengeos.org/rust/) | [Python](https://opera-rs.opengeos.org/python/)
 
 ## Highlights
 
@@ -132,6 +133,7 @@ print("Open water delta (km^2):", change["open_water_delta_km2"])
 | `crates/opera-rs` | Pure-Rust core library (published to crates.io as `opera-rs`) |
 | `crates/opera-cli` | Standalone `opera` CLI and MCP server (published to crates.io as `opera-cli`) |
 | `python` | Python bindings (`opera-rs` on PyPI, PyO3) with bundled `opera` CLI and MCP server |
+| `examples` | Interactive Jupyter / Google Colab demo notebook (`opera_rs_demo.ipynb`) |
 | `docs` | Zensical documentation site (`opera-rs.opengeos.org`) and installer scripts |
 
 ## License

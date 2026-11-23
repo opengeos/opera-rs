@@ -4,64 +4,74 @@
 
 Every [CLI subcommand](cli.md) except `mcp` and `help` is exposed automatically as an MCP tool whose `args` parameter is the CLI argument list and whose description is the command's full `--help`.
 
-## Setup
+## Client Setup
 
-### Claude Code
+=== "Claude Code"
 
-```sh
-# Using the standalone opera binary
-claude mcp add opera -- opera mcp
+    ```sh
+    # Using the standalone opera binary
+    claude mcp add opera -- opera mcp
 
-# Or zero-install via uvx
-claude mcp add opera -- uvx --from opera-rs opera mcp
-```
+    # Or zero-install via uvx
+    claude mcp add opera -- uvx --from opera-rs opera mcp
+    ```
 
-### Claude Desktop and Cursor
+=== "Claude Desktop / Cursor"
 
-Add to `claude_desktop_config.json` or `.cursor/mcp.json`:
+    Add to `claude_desktop_config.json` or `.cursor/mcp.json`:
 
-```json
-{
-  "mcpServers": {
-    "opera": {
-      "command": "opera",
-      "args": ["mcp"]
+    ```json
+    {
+      "mcpServers": {
+        "opera": {
+          "command": "opera",
+          "args": ["mcp"]
+        }
+      }
     }
-  }
-}
-```
+    ```
 
-Or with `uvx`:
+    Or zero-install with `uvx`:
 
-```json
-{
-  "mcpServers": {
-    "opera": {
-      "command": "uvx",
-      "args": ["--from", "opera-rs", "opera", "mcp"]
+    ```json
+    {
+      "mcpServers": {
+        "opera": {
+          "command": "uvx",
+          "args": ["--from", "opera-rs", "opera", "mcp"]
+        }
+      }
     }
-  }
-}
-```
+    ```
 
-### VS Code
+=== "VS Code"
 
-Add to `.vscode/mcp.json`:
+    Add to `.vscode/mcp.json`:
 
-```json
-{
-  "servers": {
-    "opera": {
-      "command": "opera",
-      "args": ["mcp"]
+    ```json
+    {
+      "servers": {
+        "opera": {
+          "command": "opera",
+          "args": ["mcp"]
+        }
+      }
     }
-  }
-}
-```
+    ```
+
+## Example Agent Prompts
+
+Once connected, you can ask your AI assistant questions such as:
+
+- *"Search NASA OPERA DSWx-HLS granules over Tulare Lake, California in April 2023 and show me a water-only map preview."*
+- *"Compare open-water area over Tulare Lake between January 15, 2023 and April 30, 2023, and save a before/after PNG."*
+- *"Run a monthly DSWx-HLS surface-water time series for Tulare Lake from January to June 2023 and export the table to CSV."*
+- *"Vectorize observed flood extent over Valencia, Spain between October 27 and November 5, 2024 using DSWx-HLS and DSWx-S1."*
+- *"Check what NASA OPERA products cover surface displacement and build an xarray TileJSON URL for DISP-S1."*
 
 ## Agent-Centric Capabilities
 
-- **Catalog & geocoding (`products`, `geocode`):** Agents can inspect all 9 OPERA collections, aliases, band defaults, and resolve named places to WGS 84 bounding boxes.
+- **Catalog & geocoding (`products`, `geocode`):** Inspect all 9 OPERA collections, aliases, band defaults, and resolve named places to WGS 84 bounding boxes.
 - **No Earthdata credentials required:** Public CMR search (`search`) and server-side authenticated `titiler-cmr` analytics (`stats`, `point`, `change`, `timeseries`, `flood-extent`, `preview`).
 - **Inline multimodal visual inspection (`preview`):** When `-o` is omitted, `opera mcp` writes the PNG into a private temporary directory, attaches it directly as MCP `image` content (`image/png`), and removes the temporary file automatically.
 - **Built-in MCP prompts (`prompts/list`, `prompts/get`):**
@@ -71,11 +81,15 @@ Add to `.vscode/mcp.json`:
   - `explore-opera-area` (`place_or_bbox`, optional `product`)
 - **Machine-readable schema (`--json-usage`):** `opera --json-usage` or `opera <subcommand> --json-usage` emits the versioned JSON schema of every flag, type, and default.
 
-## Permissions and Safety
+## Permissions, Annotations, and Limits
 
-`opera mcp` does not sandbox filesystem access; configure your MCP client's tool approval policy and review output paths before approving writes.
+`opera mcp` does not sandbox filesystem access; configure your MCP client's tool approval policy and review output paths before approving file writes.
 
-- `products` and `inspect` have `openWorldHint: false`.
-- `products`, `geocode`, `tilejson`, `point`, `stats`, and `inspect` are annotated `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`.
-- Network commands (`geocode`, `search`, `tilejson`, `point`, `stats`, `change`, `timeseries`, `flood-extent`, `preview`, `animate`, `export-html`) are annotated `openWorldHint: true`.
-- Combined command output is capped at 100,000 bytes (stderr preserved first), inline PNG previews are capped at 8 MiB, and up to 8 concurrent tool calls execute in isolated child processes with `notifications/cancelled` and clean EOF teardown.
+| Safeguard | Value / Behavior |
+| --- | --- |
+| Read-only tool hints (`readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`) | `products`, `geocode`, `tilejson`, `point`, `stats`, `inspect` |
+| Local-only tools (`openWorldHint: false`) | `products`, `inspect` |
+| Network tools (`openWorldHint: true`) | `geocode`, `search`, `tilejson`, `point`, `stats`, `change`, `timeseries`, `flood-extent`, `preview`, `animate`, `export-html` |
+| Combined stdout/stderr cap | 100,000 bytes (stderr preserved first) |
+| Inline PNG preview cap | 8 MiB |
+| Concurrency & cancellation | Up to 8 concurrent isolated child processes with `notifications/cancelled` and graceful EOF drain |
