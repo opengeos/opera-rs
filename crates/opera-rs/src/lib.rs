@@ -3,7 +3,8 @@
 //!
 //! # Features
 //! - `http` (default): Live HTTPS queries to NASA CMR, `titiler-cmr`, and OpenStreetMap Nominatim
-//!   using pure-Rust `ureq` + `rustls` (no Earthdata login required).
+//!   using `ureq` + `rustls` (no Earthdata login required). For `wasm32` targets, compile with
+//!   `--no-default-features`.
 //! - `geo` (default): Pure-Rust geospatial vector/raster I/O (GeoJSON, GeoPackage, Shapefile,
 //!   GeoTIFF/COG, CRS reprojection) powered by [`terrio`].
 //! - `parallel` (default): Multi-threaded tile fetching and raster rendering via `rayon`.
@@ -47,7 +48,7 @@ pub use titiler::{
     BandStatistics, ClassBreakdown, PointAssetValue, PointResult, StatisticsResult, TileJson,
     TitilerQuery, build_point_url, build_statistics_url, build_tile_url_template,
     build_tilejson_url, build_timeseries_tilejson_url, fetch_bbox_statistics, fetch_point,
-    fetch_statistics, fetch_tilejson, fetch_timeseries_tilejson,
+    fetch_statistics, fetch_tilejson, fetch_timeseries_tilejson, resolve_titiler_endpoint,
 };
 pub use types::{BBox, CalendarDate, TitilerBackend};
 pub use viz::{
