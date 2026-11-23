@@ -1,17 +1,547 @@
-//! Command-line interface and MCP server for `opera-rs`.
+//! Command-line interface and Model Context Protocol (MCP) server for `opera-rs`.
+
+pub mod mcp;
+mod usage;
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
+use opera_rs::analysis::{
+    ChangeDetectionOptions, TimeSeriesOptions, analyze_time_series, detect_change,
+};
+use opera_rs::cmr::{CmrSearchParams, resolve_concept_id, search_granules};
+use opera_rs::flood_extent::{FloodExtentOptions, derive_flood_extent};
+use opera_rs::geo_io::{inspect_local_raster, read_aoi_bbox, write_feature_collection};
+use opera_rs::geocode::geocode_place;
+use opera_rs::products::{
+    LayerStyle, catalog, expression_presets, find_product, is_categorical_band,
+};
+use opera_rs::titiler::{
+    TitilerQuery, build_tile_url_template, fetch_bbox_statistics, fetch_point, fetch_tilejson,
+    fetch_timeseries_tilejson,
+};
+use opera_rs::types::{BBox, TitilerBackend};
+use opera_rs::viz::{
+    HtmlTileLayer, PreviewOptions, combine_side_by_side, decorate_preview, encode_animated_gif,
+    encode_png_rgba, export_interactive_html, render_preview_png, stitch_tile_templates,
+};
+use opera_rs::{DEFAULT_TITILER_ENDPOINT, OperaError, Result};
+use serde_json::{Value, json};
 
-/// Command-line interface for NASA OPERA search, visualization, and analysis.
+/// Command-line interface for NASA OPERA search, visualization, analysis, and MCP serving.
 #[derive(Debug, Parser)]
 #[command(
     name = "opera",
     version,
-    about = "Search, visualize, and analyze NASA OPERA satellite data"
+    about = "Search, visualize, and analyze NASA OPERA satellite data (CMR, titiler-cmr, MCP)",
+    subcommand_required = false
 )]
-pub struct Cli {}
+pub struct Cli {
+    /// Print the machine-readable JSON command/argument catalog and exit.
+    #[arg(long, global = true)]
+    pub json_usage: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+}
+
+/// Shared AOI selector flags accepted by spatial commands (`--bbox`, `--place`, or `--aoi-file`).
+#[derive(Debug, Clone, Args)]
+pub struct AoiArgs {
+    /// WGS 84 bounding box as 'west,south,east,north'.
+    #[arg(long, value_name = "W,S,E,N", allow_hyphen_values = true)]
+    pub bbox: Option<String>,
+
+    /// Named place to geocode via OpenStreetMap Nominatim (e.g. 'Tulare Lake, California').
+    #[arg(long)]
+    pub place: Option<String>,
+
+    /// Path to a GeoJSON, GeoPackage (.gpkg), or Shapefile (.shp) AOI (auto-reprojected to WGS 84).
+    #[arg(long, value_name = "FILE")]
+    pub aoi_file: Option<PathBuf>,
+}
+
+impl AoiArgs {
+    fn resolve(&self) -> Result<Option<(BBox, Option<String>)>> {
+        if let Some(raw) = &self.bbox {
+            return Ok(Some((raw.parse::<BBox>()?, None)));
+        }
+        if let Some(path) = &self.aoi_file {
+            return Ok(Some((read_aoi_bbox(path)?, None)));
+        }
+        if let Some(place) = &self.place {
+            let geo = geocode_place(place, None)?;
+            return Ok(Some((geo.bbox, Some(geo.display_name))));
+        }
+        Ok(None)
+    }
+
+    fn resolve_required(&self) -> Result<(BBox, Option<String>)> {
+        self.resolve()?.ok_or_else(|| {
+            OperaError::InvalidInput(
+                "specify an area of interest with --bbox, --place, or --aoi-file".into(),
+            )
+        })
+    }
+}
+
+/// Shared `titiler-cmr` endpoint option (defaults to `OPERA_TITILER_ENDPOINT` or OpenGeos endpoint).
+fn resolve_endpoint(explicit: Option<&str>) -> String {
+    explicit
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            std::env::var("OPERA_TITILER_ENDPOINT")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_TITILER_ENDPOINT.to_string())
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Commands {
+    /// List supported NASA OPERA products, aliases, band defaults, and expression presets.
+    Products {
+        /// Optional product short name or alias to inspect in detail.
+        product: Option<String>,
+        /// Optional band token to show ready-made band-math expression presets.
+        #[arg(long)]
+        band: Option<String>,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Resolve a place name (e.g. 'Valencia Region, Spain') to a WGS 84 bounding box.
+    Geocode {
+        /// Place name to search via OpenStreetMap Nominatim.
+        place: String,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Search NASA CMR for OPERA granules, footprints, dates, and available bands.
+    Search {
+        /// OPERA product short name or alias (e.g. dswx-hls, dswx-s1, dist-alert, rtc-s1, disp-s1).
+        #[arg(short, long, default_value = "OPERA_L3_DSWX-HLS_V1")]
+        product: String,
+        #[command(flatten)]
+        aoi: AoiArgs,
+        /// Inclusive start date (YYYY-MM-DD).
+        #[arg(long)]
+        start: Option<String>,
+        /// Inclusive end date (YYYY-MM-DD).
+        #[arg(long)]
+        end: Option<String>,
+        /// Maximum number of granules to return (1-500).
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+        /// Keep only the newest granule per tile/burst id.
+        #[arg(long)]
+        newest_per_tile: bool,
+        /// Keep all reprocessed versions instead of deduplicating to the latest production run.
+        #[arg(long)]
+        all_versions: bool,
+        /// Write granule footprints to a GeoJSON, GeoPackage (.gpkg), or Shapefile (.shp).
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Build or fetch a titiler-cmr TileJSON and XYZ tile URL template (rasterio or xarray).
+    Tilejson {
+        /// OPERA product short name or alias (used to resolve collection concept-id and default styles).
+        #[arg(short, long)]
+        product: Option<String>,
+        /// Explicit CMR collection concept-id (overrides product lookup).
+        #[arg(long)]
+        concept_id: Option<String>,
+        /// Reader backend: rasterio (COG/GeoTIFF) or xarray (NetCDF/HDF5/Zarr).
+        #[arg(long, default_value = "rasterio")]
+        backend: String,
+        /// Pin to a single CMR GranuleUR.
+        #[arg(long)]
+        granule: Option<String>,
+        /// Temporal filter (RFC3339 instant or start/end range).
+        #[arg(long)]
+        temporal: Option<String>,
+        /// Rasterio band/asset name(s) (repeatable).
+        #[arg(long = "band")]
+        bands: Vec<String>,
+        /// Xarray variable name(s) (repeatable).
+        #[arg(long = "variable")]
+        variables: Vec<String>,
+        /// Xarray group path (e.g. /science/grids).
+        #[arg(long)]
+        group: Option<String>,
+        /// Rescale stretch 'min,max'.
+        #[arg(long, allow_hyphen_values = true)]
+        rescale: Option<String>,
+        /// Named titiler colormap (e.g. gray, terrain, viridis, blues).
+        #[arg(long)]
+        colormap: Option<String>,
+        /// DSWx WTR water-only colormap (hides cloud, snow, and ocean).
+        #[arg(long)]
+        water_only: bool,
+        /// rio-tiler band-math expression (selected band is b1).
+        #[arg(long)]
+        expression: Option<String>,
+        /// Optional ISO-8601 duration step (e.g. P1M) to query the timeseries TileJSON endpoint.
+        #[arg(long)]
+        timeseries_step: Option<String>,
+        /// Custom titiler-cmr endpoint URL.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Only construct and print the TileJSON / XYZ URLs without making an HTTP request.
+        #[arg(long)]
+        url_only: bool,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Query raster pixel or xarray variable values at a longitude/latitude point via titiler-cmr.
+    Point {
+        /// Longitude (EPSG:4326).
+        #[arg(long, allow_hyphen_values = true)]
+        lon: f64,
+        /// Latitude (EPSG:4326).
+        #[arg(long, allow_hyphen_values = true)]
+        lat: f64,
+        /// OPERA product short name or alias.
+        #[arg(short, long, default_value = "OPERA_L3_DSWX-HLS_V1")]
+        product: String,
+        /// Explicit CMR collection concept-id (optional; auto-resolved if omitted).
+        #[arg(long)]
+        concept_id: Option<String>,
+        /// Pin to a single CMR GranuleUR.
+        #[arg(long)]
+        granule: Option<String>,
+        /// Temporal filter (RFC3339 instant or start/end).
+        #[arg(long)]
+        temporal: Option<String>,
+        /// Band/asset token (e.g. B01_WTR, VV, VEG-DIST-STATUS).
+        #[arg(long)]
+        band: Option<String>,
+        /// rio-tiler band-math expression (selected band is b1).
+        #[arg(long)]
+        expression: Option<String>,
+        /// Custom titiler-cmr endpoint URL.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Compute zonal AOI statistics (including 30 m categorical class area breakdowns in km^2).
+    Stats {
+        /// OPERA product short name or alias.
+        #[arg(short, long, default_value = "OPERA_L3_DSWX-HLS_V1")]
+        product: String,
+        #[command(flatten)]
+        aoi: AoiArgs,
+        /// Explicit CMR collection concept-id (optional).
+        #[arg(long)]
+        concept_id: Option<String>,
+        /// Pin to a single CMR GranuleUR.
+        #[arg(long)]
+        granule: Option<String>,
+        /// Inclusive start date (YYYY-MM-DD) when granule is omitted.
+        #[arg(long)]
+        start: Option<String>,
+        /// Inclusive end date (YYYY-MM-DD) when granule is omitted.
+        #[arg(long)]
+        end: Option<String>,
+        /// Band/asset token (defaults to product preferred band).
+        #[arg(long)]
+        band: Option<String>,
+        /// rio-tiler band-math expression (selected band is b1).
+        #[arg(long)]
+        expression: Option<String>,
+        /// Request categorical histogram (auto-enabled for DSWx WTR and DIST STATUS).
+        #[arg(long)]
+        categorical: bool,
+        /// Histogram bin count for continuous bands.
+        #[arg(long)]
+        histogram_bins: Option<u32>,
+        /// Custom titiler-cmr endpoint URL.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Detect two-date OPERA surface change (before vs. after stats, class area deltas, optional preview).
+    Change {
+        /// OPERA product short name or alias (e.g. dswx-hls, dswx-s1, dist-alert, rtc-s1).
+        #[arg(short, long, default_value = "OPERA_L3_DSWX-HLS_V1")]
+        product: String,
+        #[command(flatten)]
+        aoi: AoiArgs,
+        /// Baseline date (YYYY-MM-DD).
+        #[arg(long)]
+        before: String,
+        /// Comparison date (YYYY-MM-DD).
+        #[arg(long)]
+        after: String,
+        /// Search window in days on each side of before/after dates.
+        #[arg(long, default_value_t = 10)]
+        window_days: i64,
+        /// Band/asset token (defaults to product preferred band).
+        #[arg(long)]
+        band: Option<String>,
+        /// rio-tiler band-math expression (selected band is b1).
+        #[arg(long)]
+        expression: Option<String>,
+        /// Write a side-by-side Before | After comparison PNG to this path.
+        #[arg(long, value_name = "FILE")]
+        preview_out: Option<PathBuf>,
+        /// Custom titiler-cmr endpoint URL.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Output a Markdown report instead of plain summary text.
+        #[arg(long)]
+        markdown: bool,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Analyze multi-date OPERA surface water or backscatter time-series trends over an AOI.
+    Timeseries {
+        /// OPERA product short name or alias.
+        #[arg(short, long, default_value = "OPERA_L3_DSWX-HLS_V1")]
+        product: String,
+        #[command(flatten)]
+        aoi: AoiArgs,
+        /// Inclusive start date (YYYY-MM-DD).
+        #[arg(long)]
+        start: String,
+        /// Inclusive end date (YYYY-MM-DD).
+        #[arg(long)]
+        end: String,
+        /// Minimum spacing in days between sampled observations.
+        #[arg(long)]
+        interval_days: Option<i64>,
+        /// Maximum number of observations to evaluate (1-100).
+        #[arg(long, default_value_t = 12)]
+        max_observations: usize,
+        /// Band/asset token (defaults to product preferred band).
+        #[arg(long)]
+        band: Option<String>,
+        /// rio-tiler band-math expression.
+        #[arg(long)]
+        expression: Option<String>,
+        /// Write time-series table to a CSV file.
+        #[arg(long, value_name = "FILE")]
+        csv_out: Option<PathBuf>,
+        /// Custom titiler-cmr endpoint URL.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Vectorize observed flood-water extent polygons from OPERA DSWx-HLS and/or DSWx-S1 tiles.
+    FloodExtent {
+        #[command(flatten)]
+        aoi: AoiArgs,
+        /// Inclusive event window start (YYYY-MM-DD).
+        #[arg(long)]
+        start: String,
+        /// Inclusive event window end (YYYY-MM-DD).
+        #[arg(long)]
+        end: String,
+        /// DSWx products to union (defaults to both dswx-hls and cloud-penetrating dswx-s1).
+        #[arg(long = "product")]
+        products: Vec<String>,
+        /// Maximum granules per product to mosaic.
+        #[arg(long, default_value_t = 6)]
+        max_granules: usize,
+        /// Maximum tiles across the longer AOI dimension (controls zoom level).
+        #[arg(long, default_value_t = 4)]
+        max_tiles_across: usize,
+        /// Minimum polygon area in km^2 to retain.
+        #[arg(long, default_value_t = 0.02)]
+        min_area_km2: f64,
+        /// Write derived flood polygons to GeoJSON, GeoPackage (.gpkg), or Shapefile (.shp).
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// Custom titiler-cmr endpoint URL.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Emit structured JSON output (includes GeoJSON FeatureCollection when -o is omitted).
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Render a PNG map preview of an OPERA layer over an AOI (with basemap, scale bar, legend).
+    Preview {
+        /// OPERA product short name or alias.
+        #[arg(short, long, default_value = "OPERA_L3_DSWX-HLS_V1")]
+        product: String,
+        #[command(flatten)]
+        aoi: AoiArgs,
+        /// Pin to one or more CMR GranuleURs (if omitted, searches CMR for newest matching scene).
+        #[arg(long = "granule")]
+        granules: Vec<String>,
+        /// Inclusive start date (YYYY-MM-DD) when granule is omitted.
+        #[arg(long)]
+        start: Option<String>,
+        /// Inclusive end date (YYYY-MM-DD) when granule is omitted.
+        #[arg(long)]
+        end: Option<String>,
+        /// Maximum granules to mosaic when granule is omitted.
+        #[arg(long, default_value_t = 3)]
+        max_granules: usize,
+        /// Band/asset token (defaults to product preferred band).
+        #[arg(long)]
+        band: Option<String>,
+        /// Rescale stretch 'min,max'.
+        #[arg(long, allow_hyphen_values = true)]
+        rescale: Option<String>,
+        /// Named titiler colormap.
+        #[arg(long)]
+        colormap: Option<String>,
+        /// DSWx WTR water-only colormap (hides clouds, snow, and ocean).
+        #[arg(long)]
+        water_only: bool,
+        /// rio-tiler band-math expression (selected band is b1).
+        #[arg(long)]
+        expression: Option<String>,
+        /// Maximum image width or height in pixels.
+        #[arg(long, default_value_t = 1024)]
+        max_dim: usize,
+        /// Maximum tiles across the longer AOI dimension.
+        #[arg(long, default_value_t = 4)]
+        max_tiles_across: usize,
+        /// Disable CARTO Voyager basemap compositing.
+        #[arg(long)]
+        no_basemap: bool,
+        /// Disable metric scale bar overlay.
+        #[arg(long)]
+        no_scale_bar: bool,
+        /// Disable categorical legend overlay.
+        #[arg(long)]
+        no_legend: bool,
+        /// Optional title banner drawn on the preview.
+        #[arg(long)]
+        title: Option<String>,
+        /// Custom titiler-cmr endpoint URL.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Output PNG path (required on CLI; omit in `opera mcp` to receive inline image content).
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+    },
+
+    /// Render an animated time-series GIF across OPERA acquisition dates for an AOI.
+    Animate {
+        /// OPERA product short name or alias.
+        #[arg(short, long, default_value = "OPERA_L3_DSWX-HLS_V1")]
+        product: String,
+        #[command(flatten)]
+        aoi: AoiArgs,
+        /// Inclusive start date (YYYY-MM-DD).
+        #[arg(long)]
+        start: String,
+        /// Inclusive end date (YYYY-MM-DD).
+        #[arg(long)]
+        end: String,
+        /// Maximum number of frames (dates) to render.
+        #[arg(long, default_value_t = 8)]
+        max_frames: usize,
+        /// Minimum spacing in days between frames.
+        #[arg(long)]
+        interval_days: Option<i64>,
+        /// Frame delay in centiseconds (e.g. 75 = 0.75 s/frame).
+        #[arg(long, default_value_t = 75)]
+        delay_cs: u16,
+        /// Band/asset token.
+        #[arg(long)]
+        band: Option<String>,
+        /// DSWx WTR water-only colormap.
+        #[arg(long)]
+        water_only: bool,
+        /// Maximum frame width or height in pixels.
+        #[arg(long, default_value_t = 640)]
+        max_dim: usize,
+        /// Disable CARTO Voyager basemap compositing.
+        #[arg(long)]
+        no_basemap: bool,
+        /// Custom titiler-cmr endpoint URL.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Output GIF path.
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Export a self-contained interactive MapLibre GL JS HTML viewer for matching OPERA layers.
+    ExportHtml {
+        /// OPERA product short name or alias.
+        #[arg(short, long, default_value = "OPERA_L3_DSWX-HLS_V1")]
+        product: String,
+        #[command(flatten)]
+        aoi: AoiArgs,
+        /// Inclusive start date (YYYY-MM-DD).
+        #[arg(long)]
+        start: Option<String>,
+        /// Inclusive end date (YYYY-MM-DD).
+        #[arg(long)]
+        end: Option<String>,
+        /// Maximum granules to embed as interactive tile layers.
+        #[arg(long, default_value_t = 4)]
+        max_granules: usize,
+        /// Band/asset token.
+        #[arg(long)]
+        band: Option<String>,
+        /// DSWx WTR water-only colormap.
+        #[arg(long)]
+        water_only: bool,
+        /// Map page title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Custom titiler-cmr endpoint URL.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Output HTML file path.
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect a local OPERA GeoTIFF/COG on disk via pure-Rust terrio (CRS, stats, class areas).
+    Inspect {
+        /// Path to a local GeoTIFF/COG file.
+        path: PathBuf,
+        /// Optional OPERA product hint (e.g. dswx-hls, dist-alert) to decode class labels & areas.
+        #[arg(short, long)]
+        product: Option<String>,
+        /// Optional band hint (e.g. B01_WTR, VEG-DIST-STATUS).
+        #[arg(long)]
+        band: Option<String>,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Start the Model Context Protocol (MCP) server over stdin/stdout for AI agents.
+    Mcp,
+}
 
 /// Runs the CLI with the given arguments and returns the process exit code.
 pub fn run<I, T>(args: I) -> i32
@@ -19,16 +549,1101 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    match Cli::try_parse_from(args) {
-        Ok(_) => {
-            println!("opera-rs {}", opera_rs::VERSION);
-            0
-        }
+    run_with_self_command(args, None)
+}
+
+/// Runs the CLI, using `self_cmd` (e.g. `python -m opera_rs`) when `opera mcp` spawns child tools.
+pub fn run_with_self_command<I, T>(args: I, self_cmd: Option<Vec<OsString>>) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let os_args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    if let Some(usage_res) = usage::requested(&os_args) {
+        return match usage_res {
+            Ok(doc) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&doc).expect("serialize --json-usage")
+                );
+                0
+            }
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                2
+            }
+        };
+    }
+
+    let parsed = usage::with_clap_stack(move || Cli::try_parse_from(os_args));
+    let cli = match parsed {
+        Ok(c) => c,
         Err(err) => {
             let code = err.exit_code();
             let _ = err.print();
-            code
+            return code;
         }
+    };
+
+    let Some(command) = cli.command else {
+        let mut cmd = usage::with_clap_stack(<Cli as clap::CommandFactory>::command);
+        let _ = cmd.print_help();
+        println!();
+        return 0;
+    };
+
+    if matches!(command, Commands::Mcp) {
+        let cmdline = match self_cmd {
+            Some(c) if !c.is_empty() => c,
+            _ => match mcp::this_binary() {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("error: could not determine opera executable path: {e}");
+                    return 1;
+                }
+            },
+        };
+        return match mcp::serve(cmdline) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: MCP server failed: {e}");
+                1
+            }
+        };
+    }
+
+    match dispatch(command) {
+        Ok(()) => 0,
+        Err(err) => {
+            eprintln!("error: {err}");
+            1
+        }
+    }
+}
+
+fn print_json(val: &Value) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(val)?);
+    Ok(())
+}
+
+fn dispatch(command: Commands) -> Result<()> {
+    match command {
+        Commands::Products {
+            product,
+            band,
+            json: as_json,
+        } => {
+            if let Some(name) = product {
+                let prod = find_product(&name)?;
+                let presets = band
+                    .as_deref()
+                    .or_else(|| prod.default_bands.first().map(String::as_str))
+                    .map(|b| expression_presets(&prod.short_name, b))
+                    .unwrap_or_default();
+                if as_json {
+                    print_json(&json!({
+                        "product": prod,
+                        "expression_presets": presets,
+                    }))?;
+                } else {
+                    println!("{} ({})", prod.short_name, prod.short_title);
+                    println!("  Title:       {}", prod.title);
+                    println!("  Description: {}", prod.description);
+                    println!("  Backend:     {}", prod.backend);
+                    println!("  Bands:       {}", prod.default_bands.join(", "));
+                    if !presets.is_empty() {
+                        println!("  Expressions:");
+                        for p in presets {
+                            println!("    - {}: {}", p.label, p.expression);
+                        }
+                    }
+                }
+            } else {
+                let all = catalog();
+                if as_json {
+                    print_json(&json!({"products": all}))?;
+                } else {
+                    for p in all {
+                        println!(
+                            "{:<28} {:<14} [{}] {}",
+                            p.short_name, p.short_title, p.backend, p.description
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Geocode {
+            place,
+            json: as_json,
+        } => {
+            let res = geocode_place(&place, None)?;
+            if as_json {
+                print_json(&serde_json::to_value(&res)?)?;
+            } else {
+                println!("{}", res.display_name);
+                println!("bbox: {} ({:.2} km^2)", res.bbox, res.bbox.area_km2());
+            }
+            Ok(())
+        }
+
+        Commands::Search {
+            product,
+            aoi,
+            start,
+            end,
+            limit,
+            newest_per_tile,
+            all_versions,
+            output,
+            json: as_json,
+        } => {
+            let resolved_aoi = aoi.resolve()?;
+            let bbox = resolved_aoi.as_ref().map(|(b, _)| *b);
+            let res = search_granules(&CmrSearchParams {
+                product,
+                bbox,
+                start,
+                end,
+                limit,
+                deduplicate_versions: !all_versions,
+                newest_per_tile,
+                cmr_endpoint: None,
+            })?;
+            let written = if let Some(path) = &output {
+                Some((
+                    path.display().to_string(),
+                    write_feature_collection(&res.feature_collection, path, "opera_footprints")?,
+                ))
+            } else {
+                None
+            };
+            if as_json {
+                let mut v = serde_json::to_value(&res)?;
+                if let Some((p, count)) = written {
+                    v["written_footprints"] = json!({"path": p, "features": count});
+                }
+                if let Some((_, Some(place_name))) = resolved_aoi {
+                    v["geocoded_place"] = json!(place_name);
+                }
+                print_json(&v)?;
+            } else {
+                println!(
+                    "{}: {} returned ({} total CMR hits, {} dates)",
+                    res.product,
+                    res.granules.len(),
+                    res.hits,
+                    res.dates.len()
+                );
+                if let Some(cid) = &res.concept_id {
+                    println!("collection concept_id: {cid}");
+                }
+                for g in &res.granules {
+                    println!(
+                        "  {} | {} {} | tile={} | bands=[{}]",
+                        g.id,
+                        g.date,
+                        g.time,
+                        g.tile,
+                        g.bands.join(",")
+                    );
+                }
+                if let Some((p, count)) = written {
+                    println!("Wrote {count} footprints to {p}");
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Tilejson {
+            product,
+            concept_id,
+            backend,
+            granule,
+            temporal,
+            bands,
+            variables,
+            group,
+            rescale,
+            colormap,
+            water_only,
+            expression,
+            timeseries_step,
+            endpoint,
+            url_only,
+            json: as_json,
+        } => {
+            let backend_parsed: TitilerBackend = backend.parse()?;
+            let prod_info = product.as_deref().map(find_product).transpose()?;
+            let resolved_cid = match concept_id {
+                Some(cid) => cid,
+                None => {
+                    let prod_name = prod_info
+                        .as_ref()
+                        .map(|p| p.short_name.as_str())
+                        .or(product.as_deref())
+                        .ok_or_else(|| {
+                            OperaError::InvalidInput(
+                                "provide either --product or --concept-id".into(),
+                            )
+                        })?;
+                    resolve_concept_id(prod_name, None)?
+                }
+            };
+            let prod_name = prod_info.as_ref().map(|p| p.short_name.clone()).or(product);
+            let chosen_bands = if bands.is_empty() && backend_parsed == TitilerBackend::Rasterio {
+                prod_info
+                    .as_ref()
+                    .and_then(|p| p.default_bands.first().cloned())
+                    .into_iter()
+                    .collect()
+            } else {
+                bands
+            };
+            let style = prod_name
+                .as_deref()
+                .map(|p| {
+                    LayerStyle::for_band(
+                        p,
+                        chosen_bands.first().map(String::as_str),
+                        water_only,
+                        rescale.as_deref(),
+                        colormap.as_deref(),
+                    )
+                })
+                .unwrap_or(LayerStyle {
+                    colormap: None,
+                    colormap_name: colormap,
+                    rescale,
+                });
+
+            let mut query = TitilerQuery::rasterio(&resolved_cid);
+            query.endpoint = resolve_endpoint(endpoint.as_deref());
+            query.backend = backend_parsed;
+            query.product = prod_name;
+            query.granule_ur = granule;
+            query.temporal = temporal;
+            query.assets = chosen_bands;
+            query.variables = variables;
+            query.group = group;
+            query.expression = expression;
+            query.colormap = style.colormap;
+            query.colormap_name = style.colormap_name;
+            if let Some(r) = style.rescale {
+                query.rescale = vec![r];
+            }
+
+            let tile_template = build_tile_url_template(&query, 512);
+            if url_only {
+                let tj_url = opera_rs::build_tilejson_url(&query);
+                if as_json {
+                    print_json(&json!({
+                        "concept_id": resolved_cid,
+                        "tilejson_url": tj_url,
+                        "tile_url_template": tile_template,
+                    }))?;
+                } else {
+                    println!("TileJSON URL: {tj_url}");
+                    println!("XYZ Template: {tile_template}");
+                }
+                return Ok(());
+            }
+
+            if let Some(step) = timeseries_step {
+                let ts = fetch_timeseries_tilejson(&query, Some(&step), None)?;
+                if as_json {
+                    print_json(&serde_json::to_value(&ts)?)?;
+                } else {
+                    println!("Returned {} timeseries TileJSON entries", ts.len());
+                    for (k, v) in ts {
+                        println!(
+                            "  {k}: {}",
+                            v.tiles.first().map(String::as_str).unwrap_or("")
+                        );
+                    }
+                }
+            } else {
+                let tj = fetch_tilejson(&query)?;
+                if as_json {
+                    print_json(&json!({
+                        "concept_id": resolved_cid,
+                        "tilejson": tj,
+                        "tile_url_template": tile_template,
+                    }))?;
+                } else {
+                    println!("concept_id: {resolved_cid}");
+                    for t in &tj.tiles {
+                        println!("tile: {t}");
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Point {
+            lon,
+            lat,
+            product,
+            concept_id,
+            granule,
+            temporal,
+            band,
+            expression,
+            endpoint,
+            json: as_json,
+        } => {
+            let prod = find_product(&product)?;
+            let cid = match concept_id {
+                Some(c) => c,
+                None => resolve_concept_id(&prod.short_name, None)?,
+            };
+            let chosen_band = band.or_else(|| prod.default_bands.first().cloned());
+            let mut query = TitilerQuery::rasterio(&cid);
+            query.endpoint = resolve_endpoint(endpoint.as_deref());
+            query.product = Some(prod.short_name.clone());
+            query.granule_ur = granule;
+            query.temporal = temporal;
+            if let Some(b) = chosen_band {
+                query.assets = vec![b];
+            }
+            query.expression = expression;
+
+            let res = fetch_point(&query, lon, lat)?;
+            if as_json {
+                print_json(&serde_json::to_value(&res)?)?;
+            } else {
+                println!(
+                    "Point ({:.6}, {:.6}):",
+                    res.coordinates[0], res.coordinates[1]
+                );
+                for asset in &res.assets {
+                    println!("  {}", asset.name);
+                    for ((val, bname), label) in asset
+                        .values
+                        .iter()
+                        .zip(asset.band_names.iter())
+                        .zip(asset.class_labels.iter())
+                    {
+                        let v_str = val
+                            .map(|v| format!("{v}"))
+                            .unwrap_or_else(|| "nodata".into());
+                        match label {
+                            Some(lbl) => println!("    {bname}: {v_str} ({lbl})"),
+                            None => println!("    {bname}: {v_str}"),
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Stats {
+            product,
+            aoi,
+            concept_id,
+            granule,
+            start,
+            end,
+            band,
+            expression,
+            categorical,
+            histogram_bins,
+            endpoint,
+            json: as_json,
+        } => {
+            let prod = find_product(&product)?;
+            let (bbox, place_name) = aoi.resolve_required()?;
+            let (cid, resolved_granule, chosen_band) = if let Some(g) = granule {
+                let c = match concept_id {
+                    Some(cid) => cid,
+                    None => resolve_concept_id(&prod.short_name, None)?,
+                };
+                let b = band
+                    .or_else(|| prod.default_bands.first().cloned())
+                    .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
+                (c, Some(g), b)
+            } else {
+                let search = search_granules(&CmrSearchParams {
+                    product: prod.short_name.clone(),
+                    bbox: Some(bbox),
+                    start,
+                    end,
+                    limit: 5,
+                    deduplicate_versions: true,
+                    newest_per_tile: true,
+                    cmr_endpoint: None,
+                })?;
+                let first = search.granules.first().ok_or_else(|| {
+                    OperaError::NoResults(format!("no {} granules found in AOI", prod.short_name))
+                })?;
+                let c = concept_id
+                    .or_else(|| first.concept_id.clone())
+                    .or(search.concept_id)
+                    .ok_or_else(|| OperaError::NoResults("missing concept_id".into()))?;
+                let b = band
+                    .or_else(|| prod.choose_band(&first.bands))
+                    .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
+                (c, Some(first.id.clone()), b)
+            };
+
+            let is_cat = categorical
+                || (expression.is_none()
+                    && is_categorical_band(&prod.short_name, Some(&chosen_band)));
+            let mut query = TitilerQuery::rasterio(&cid);
+            query.endpoint = resolve_endpoint(endpoint.as_deref());
+            query.product = Some(prod.short_name.clone());
+            query.granule_ur = resolved_granule.clone();
+            query.assets = vec![chosen_band.clone()];
+            query.expression = expression;
+
+            let stats = fetch_bbox_statistics(&query, bbox, is_cat, histogram_bins)?;
+            if as_json {
+                print_json(&json!({
+                    "product": prod.short_name,
+                    "concept_id": cid,
+                    "granule": resolved_granule,
+                    "band": chosen_band,
+                    "bbox": bbox,
+                    "geocoded_place": place_name,
+                    "categorical": is_cat,
+                    "statistics": stats,
+                }))?;
+            } else {
+                println!(
+                    "{} ({}) band={} bbox={}",
+                    prod.short_name,
+                    resolved_granule.as_deref().unwrap_or("mosaic"),
+                    chosen_band,
+                    bbox
+                );
+                for (bname, b) in &stats.bands {
+                    println!(
+                        "  {bname}: min={:?} max={:?} mean={:?} valid={:.1}%",
+                        b.min,
+                        b.max,
+                        b.mean,
+                        b.valid_percent.unwrap_or(0.0)
+                    );
+                    for cls in &b.class_breakdown {
+                        println!(
+                            "    class {:>3} ({:<24}): {:>9.0} px | {:>5.1}% | {:>8.3} km^2",
+                            cls.class_value,
+                            cls.label.as_deref().unwrap_or("-"),
+                            cls.pixel_count,
+                            cls.percent,
+                            cls.area_km2
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Change {
+            product,
+            aoi,
+            before,
+            after,
+            window_days,
+            band,
+            expression,
+            preview_out,
+            endpoint,
+            markdown,
+            json: as_json,
+        } => {
+            let (bbox, _) = aoi.resolve_required()?;
+            let ep = resolve_endpoint(endpoint.as_deref());
+            let res = detect_change(&ChangeDetectionOptions {
+                product,
+                bbox,
+                aoi_geojson: None,
+                before_date: before,
+                after_date: after,
+                window_days,
+                band,
+                expression: expression.clone(),
+                titiler_endpoint: Some(ep.clone()),
+                cmr_endpoint: None,
+            })?;
+
+            if let Some(preview_path) = &preview_out {
+                let style = LayerStyle::for_band(&res.product, Some(&res.band), true, None, None);
+                let make_query = |ur: &str| {
+                    let mut q = TitilerQuery::rasterio(&res.concept_id);
+                    q.endpoint = ep.clone();
+                    q.product = Some(res.product.clone());
+                    q.granule_ur = Some(ur.to_string());
+                    q.assets = vec![res.band.clone()];
+                    q.expression = expression.clone();
+                    q.colormap = style.colormap.clone();
+                    q.colormap_name = style.colormap_name.clone();
+                    if let Some(r) = &style.rescale {
+                        q.rescale = vec![r.clone()];
+                    }
+                    q
+                };
+                let b_tpl = build_tile_url_template(&make_query(&res.before.granule_id), 256);
+                let a_tpl = build_tile_url_template(&make_query(&res.after.granule_id), 256);
+                let mut left = stitch_tile_templates(bbox, &[b_tpl], 3, 512, true)?;
+                let mut right = stitch_tile_templates(bbox, &[a_tpl], 3, 512, true)?;
+                decorate_preview(
+                    &mut left,
+                    &PreviewOptions {
+                        title: Some(format!("BEFORE {}", res.before.acquired_date)),
+                        water_only: true,
+                        legend: false,
+                        ..PreviewOptions::new(bbox, &res.product, Some(res.band.clone()))
+                    },
+                );
+                decorate_preview(
+                    &mut right,
+                    &PreviewOptions {
+                        title: Some(format!("AFTER {}", res.after.acquired_date)),
+                        water_only: true,
+                        scale_bar: false,
+                        ..PreviewOptions::new(bbox, &res.product, Some(res.band.clone()))
+                    },
+                );
+                let combined = combine_side_by_side(&left, &right);
+                let bytes = encode_png_rgba(&combined)?;
+                if let Some(parent) = preview_path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(preview_path, bytes)?;
+            }
+
+            if as_json {
+                print_json(&serde_json::to_value(&res)?)?;
+            } else if markdown {
+                print!("{}", res.to_markdown());
+            } else {
+                println!(
+                    "{} ({}) change: {} -> {}",
+                    res.product, res.band, res.before.acquired_date, res.after.acquired_date
+                );
+                if let (Some(b), Some(a), Some(d)) = (
+                    res.before.open_water_km2,
+                    res.after.open_water_km2,
+                    res.open_water_delta_km2,
+                ) {
+                    println!("  Open water:  {b:.3} -> {a:.3} km^2 (delta {d:+.3} km^2)");
+                }
+                if let (Some(b), Some(a), Some(d)) = (
+                    res.before.total_water_km2,
+                    res.after.total_water_km2,
+                    res.total_water_delta_km2,
+                ) {
+                    println!("  Total water: {b:.3} -> {a:.3} km^2 (delta {d:+.3} km^2)");
+                }
+                if let Some(dm) = res.mean_delta {
+                    println!("  Band mean delta: {dm:+.4}");
+                }
+                if let Some(p) = preview_out {
+                    println!("  Saved comparison preview to {}", p.display());
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Timeseries {
+            product,
+            aoi,
+            start,
+            end,
+            interval_days,
+            max_observations,
+            band,
+            expression,
+            csv_out,
+            endpoint,
+            json: as_json,
+        } => {
+            let (bbox, _) = aoi.resolve_required()?;
+            let res = analyze_time_series(&TimeSeriesOptions {
+                product,
+                bbox,
+                aoi_geojson: None,
+                start,
+                end,
+                interval_days,
+                max_observations,
+                band,
+                expression,
+                titiler_endpoint: Some(resolve_endpoint(endpoint.as_deref())),
+                cmr_endpoint: None,
+            })?;
+            if let Some(csv_path) = &csv_out {
+                if let Some(parent) = csv_path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(csv_path, res.to_csv())?;
+            }
+            if as_json {
+                print_json(&serde_json::to_value(&res)?)?;
+            } else {
+                println!(
+                    "{} ({}) time series: {} observations ({} to {})",
+                    res.product,
+                    res.band,
+                    res.observations.len(),
+                    res.start,
+                    res.end
+                );
+                for obs in &res.observations {
+                    if let Some(tw) = obs.total_water_km2 {
+                        println!(
+                            "  {} | open={:.3} km^2 | total={:.3} km^2 | {}",
+                            obs.acquired_date,
+                            obs.open_water_km2.unwrap_or(0.0),
+                            tw,
+                            obs.granule_id
+                        );
+                    } else {
+                        println!(
+                            "  {} | mean={:.4} | {}",
+                            obs.acquired_date,
+                            obs.stats.mean.unwrap_or(f64::NAN),
+                            obs.granule_id
+                        );
+                    }
+                }
+                if let Some(tr) = &res.trend {
+                    println!(
+                        "  Trend ({}): min={:.3}, max={:.3}, mean={:.3}, net={:+.3}, slope={:?}/day",
+                        tr.metric, tr.min, tr.max, tr.mean, tr.net_change, tr.slope_per_day
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        Commands::FloodExtent {
+            aoi,
+            start,
+            end,
+            products,
+            max_granules,
+            max_tiles_across,
+            min_area_km2,
+            output,
+            endpoint,
+            json: as_json,
+        } => {
+            let (bbox, _) = aoi.resolve_required()?;
+            let mut opts = FloodExtentOptions::new(bbox, start, end);
+            if !products.is_empty() {
+                opts.products = products;
+            }
+            opts.max_granules_per_product = max_granules;
+            opts.max_tiles_across = max_tiles_across;
+            opts.min_area_km2 = min_area_km2;
+            opts.titiler_endpoint = Some(resolve_endpoint(endpoint.as_deref()));
+
+            let res = derive_flood_extent(&opts)?;
+            if let Some(out_path) = &output {
+                write_feature_collection(&res.feature_collection, out_path, "opera_flood_extent")?;
+            }
+            if as_json {
+                let mut val = serde_json::to_value(&res)?;
+                if let Some(out_path) = &output {
+                    // Omit bulky GeoJSON inline when saved to disk so agent context stays compact.
+                    val["output_path"] = json!(out_path.display().to_string());
+                    val.as_object_mut().unwrap().remove("feature_collection");
+                }
+                print_json(&val)?;
+            } else {
+                println!(
+                    "Derived {} observed water polygon(s) totaling {:.3} km^2 (zoom {})",
+                    res.polygon_count, res.total_area_km2, res.zoom
+                );
+                println!("Provenance: {}", res.provenance);
+                if let Some(out_path) = &output {
+                    println!("Saved flood extent to {}", out_path.display());
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Preview {
+            product,
+            aoi,
+            granules,
+            start,
+            end,
+            max_granules,
+            band,
+            rescale,
+            colormap,
+            water_only,
+            expression,
+            max_dim,
+            max_tiles_across,
+            no_basemap,
+            no_scale_bar,
+            no_legend,
+            title,
+            endpoint,
+            output,
+        } => {
+            let prod = find_product(&product)?;
+            let (bbox, place_name) = aoi.resolve_required()?;
+            let ep = resolve_endpoint(endpoint.as_deref());
+
+            let (cid, chosen_granules, chosen_band, date_label) = if !granules.is_empty() {
+                let cid = resolve_concept_id(&prod.short_name, None)?;
+                let b = band
+                    .or_else(|| prod.default_bands.first().cloned())
+                    .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
+                (cid, granules, b, None)
+            } else {
+                let search = search_granules(&CmrSearchParams {
+                    product: prod.short_name.clone(),
+                    bbox: Some(bbox),
+                    start,
+                    end,
+                    limit: max_granules.clamp(1, 15) * 3,
+                    deduplicate_versions: true,
+                    newest_per_tile: true,
+                    cmr_endpoint: None,
+                })?;
+                if search.granules.is_empty() {
+                    return Err(OperaError::NoResults(format!(
+                        "no {} granules found over {}",
+                        prod.short_name, bbox
+                    )));
+                }
+                let cid = search
+                    .concept_id
+                    .clone()
+                    .or_else(|| search.granules[0].concept_id.clone())
+                    .ok_or_else(|| OperaError::NoResults("missing concept_id".into()))?;
+                let b = band
+                    .or_else(|| prod.choose_band(&search.granules[0].bands))
+                    .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
+                let latest_date = search.dates.first().cloned();
+                let urs: Vec<String> = search
+                    .granules
+                    .into_iter()
+                    .take(max_granules.clamp(1, 15))
+                    .map(|g| g.id)
+                    .collect();
+                (cid, urs, b, latest_date)
+            };
+
+            let style = LayerStyle::for_band(
+                &prod.short_name,
+                Some(&chosen_band),
+                water_only,
+                rescale.as_deref(),
+                colormap.as_deref(),
+            );
+            let queries: Vec<TitilerQuery> = chosen_granules
+                .iter()
+                .map(|ur| {
+                    let mut q = TitilerQuery::rasterio(&cid);
+                    q.endpoint = ep.clone();
+                    q.product = Some(prod.short_name.clone());
+                    q.granule_ur = Some(ur.clone());
+                    q.assets = vec![chosen_band.clone()];
+                    q.expression = expression.clone();
+                    q.colormap = style.colormap.clone();
+                    q.colormap_name = style.colormap_name.clone();
+                    if let Some(r) = &style.rescale {
+                        q.rescale = vec![r.clone()];
+                    }
+                    q
+                })
+                .collect();
+
+            let banner = title.or_else(|| {
+                Some(format!(
+                    "{} {} {}",
+                    prod.short_title,
+                    chosen_band,
+                    date_label.as_deref().unwrap_or("")
+                ))
+            });
+            let mut opts = PreviewOptions::new(bbox, &prod.short_name, Some(chosen_band.clone()));
+            opts.water_only = water_only;
+            opts.max_dim = max_dim;
+            opts.max_tiles_across = max_tiles_across;
+            opts.basemap = !no_basemap;
+            opts.scale_bar = !no_scale_bar;
+            opts.legend = !no_legend;
+            opts.title = banner;
+
+            let png_bytes = render_preview_png(&queries, &opts)?;
+            if let Some(parent) = output.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&output, &png_bytes)?;
+            println!(
+                "Rendered {} ({}, {} granule(s){}) preview ({} bytes) to {}",
+                prod.short_name,
+                chosen_band,
+                chosen_granules.len(),
+                place_name
+                    .as_deref()
+                    .map(|p| format!(", {p}"))
+                    .unwrap_or_default(),
+                png_bytes.len(),
+                output.display()
+            );
+            Ok(())
+        }
+
+        Commands::Animate {
+            product,
+            aoi,
+            start,
+            end,
+            max_frames,
+            interval_days,
+            delay_cs,
+            band,
+            water_only,
+            max_dim,
+            no_basemap,
+            endpoint,
+            output,
+            json: as_json,
+        } => {
+            let prod = find_product(&product)?;
+            let (bbox, _) = aoi.resolve_required()?;
+            let ep = resolve_endpoint(endpoint.as_deref());
+            let search = search_granules(&CmrSearchParams {
+                product: prod.short_name.clone(),
+                bbox: Some(bbox),
+                start: Some(start),
+                end: Some(end),
+                limit: 150,
+                deduplicate_versions: true,
+                newest_per_tile: false,
+                cmr_endpoint: None,
+            })?;
+            if search.granules.is_empty() {
+                return Err(OperaError::NoResults(format!(
+                    "no {} granules found to animate",
+                    prod.short_name
+                )));
+            }
+            let cid = search
+                .concept_id
+                .clone()
+                .ok_or_else(|| OperaError::NoResults("missing concept_id".into()))?;
+            let sampled = opera_rs::analysis::sample_granules_chronologically(
+                search.granules,
+                interval_days,
+                max_frames.clamp(1, 30),
+            );
+            let chosen_band = band
+                .or_else(|| prod.choose_band(&sampled[0].bands))
+                .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
+            let style =
+                LayerStyle::for_band(&prod.short_name, Some(&chosen_band), water_only, None, None);
+
+            let mut frames = Vec::with_capacity(sampled.len());
+            let mut dates = Vec::with_capacity(sampled.len());
+            for g in &sampled {
+                let mut q = TitilerQuery::rasterio(&cid);
+                q.endpoint = ep.clone();
+                q.product = Some(prod.short_name.clone());
+                q.granule_ur = Some(g.id.clone());
+                q.assets = vec![chosen_band.clone()];
+                q.colormap = style.colormap.clone();
+                q.colormap_name = style.colormap_name.clone();
+                if let Some(r) = &style.rescale {
+                    q.rescale = vec![r.clone()];
+                }
+                let tpl = build_tile_url_template(&q, 256);
+                let mut img = stitch_tile_templates(bbox, &[tpl], 3, max_dim, !no_basemap)?;
+                let mut opts =
+                    PreviewOptions::new(bbox, &prod.short_name, Some(chosen_band.clone()));
+                opts.water_only = water_only;
+                opts.title = Some(format!("{} {}", prod.short_title, g.date));
+                decorate_preview(&mut img, &opts);
+                dates.push(g.date.clone());
+                frames.push(img);
+            }
+
+            let gif_bytes = encode_animated_gif(&frames, delay_cs)?;
+            if let Some(parent) = output.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&output, &gif_bytes)?;
+            if as_json {
+                print_json(&json!({
+                    "product": prod.short_name,
+                    "band": chosen_band,
+                    "frames": frames.len(),
+                    "dates": dates,
+                    "bytes": gif_bytes.len(),
+                    "output": output.display().to_string(),
+                }))?;
+            } else {
+                println!(
+                    "Wrote {}-frame animated GIF ({} bytes) to {}",
+                    frames.len(),
+                    gif_bytes.len(),
+                    output.display()
+                );
+            }
+            Ok(())
+        }
+
+        Commands::ExportHtml {
+            product,
+            aoi,
+            start,
+            end,
+            max_granules,
+            band,
+            water_only,
+            title,
+            endpoint,
+            output,
+            json: as_json,
+        } => {
+            let prod = find_product(&product)?;
+            let (bbox, place_name) = aoi.resolve_required()?;
+            let ep = resolve_endpoint(endpoint.as_deref());
+            let search = search_granules(&CmrSearchParams {
+                product: prod.short_name.clone(),
+                bbox: Some(bbox),
+                start,
+                end,
+                limit: max_granules.clamp(1, 15) * 3,
+                deduplicate_versions: true,
+                newest_per_tile: true,
+                cmr_endpoint: None,
+            })?;
+            if search.granules.is_empty() {
+                return Err(OperaError::NoResults(format!(
+                    "no {} granules found over {}",
+                    prod.short_name, bbox
+                )));
+            }
+            let cid = search
+                .concept_id
+                .clone()
+                .ok_or_else(|| OperaError::NoResults("missing concept_id".into()))?;
+            let chosen_band = band
+                .or_else(|| prod.choose_band(&search.granules[0].bands))
+                .ok_or_else(|| OperaError::InvalidInput("specify --band".into()))?;
+            let style =
+                LayerStyle::for_band(&prod.short_name, Some(&chosen_band), water_only, None, None);
+
+            let layers: Vec<HtmlTileLayer> = search
+                .granules
+                .iter()
+                .take(max_granules.clamp(1, 15))
+                .enumerate()
+                .map(|(i, g)| {
+                    let mut q = TitilerQuery::rasterio(&cid);
+                    q.endpoint = ep.clone();
+                    q.product = Some(prod.short_name.clone());
+                    q.granule_ur = Some(g.id.clone());
+                    q.assets = vec![chosen_band.clone()];
+                    q.colormap = style.colormap.clone();
+                    q.colormap_name = style.colormap_name.clone();
+                    if let Some(r) = &style.rescale {
+                        q.rescale = vec![r.clone()];
+                    }
+                    HtmlTileLayer {
+                        id: format!("opera-layer-{i}"),
+                        label: format!("{} {} ({})", prod.short_title, g.date, g.tile),
+                        tile_url: build_tile_url_template(&q, 256),
+                        opacity: 0.85,
+                    }
+                })
+                .collect();
+
+            let page_title = title.unwrap_or_else(|| {
+                format!(
+                    "NASA OPERA {} ({}){}",
+                    prod.short_title,
+                    chosen_band,
+                    place_name
+                        .as_deref()
+                        .map(|p| format!(" - {p}"))
+                        .unwrap_or_default()
+                )
+            });
+
+            export_interactive_html(
+                &output,
+                &page_title,
+                bbox,
+                &layers,
+                Some(&search.feature_collection),
+                Some(&style),
+            )?;
+
+            if as_json {
+                print_json(&json!({
+                    "title": page_title,
+                    "product": prod.short_name,
+                    "band": chosen_band,
+                    "layers": layers.len(),
+                    "output": output.display().to_string(),
+                }))?;
+            } else {
+                println!(
+                    "Exported interactive MapLibre HTML ({} layer(s)) to {}",
+                    layers.len(),
+                    output.display()
+                );
+            }
+            Ok(())
+        }
+
+        Commands::Inspect {
+            path,
+            product,
+            band,
+            json: as_json,
+        } => {
+            let summary = inspect_local_raster(&path, product.as_deref(), band.as_deref())?;
+            if as_json {
+                print_json(&serde_json::to_value(&summary)?)?;
+            } else {
+                println!(
+                    "{}: {}x{} | CRS={} | pixel={}x{} | valid={} px",
+                    summary.path,
+                    summary.width,
+                    summary.height,
+                    summary.crs.as_deref().unwrap_or("unknown"),
+                    summary.pixel_size_x,
+                    summary.pixel_size_y,
+                    summary.valid_pixels
+                );
+                if !summary.class_breakdown.is_empty() {
+                    for c in &summary.class_breakdown {
+                        println!(
+                            "  class {:>3} ({:<24}): {:>9.0} px | {:>5.1}% | {:>8.3} km^2",
+                            c.class_value,
+                            c.label.as_deref().unwrap_or("-"),
+                            c.pixel_count,
+                            c.percent,
+                            c.area_km2
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Mcp => unreachable!("handled before dispatch"),
     }
 }
 
@@ -37,7 +1652,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_bare_invocation() {
-        assert_eq!(run(["opera"]), 0);
+    fn lists_products_and_emits_json_usage() {
+        assert_eq!(run(["opera", "products", "--json"]), 0);
+        assert_eq!(run(["opera", "products", "dswx-hls", "--json"]), 0);
+        assert_eq!(run(["opera", "--json-usage"]), 0);
+        assert_eq!(run(["opera", "search", "--json-usage"]), 0);
+        assert_eq!(run(["opera", "mcp", "--json-usage"]), 2);
+    }
+
+    #[test]
+    fn builds_tilejson_url_offline_with_negative_rescale_and_bbox() {
+        assert_eq!(
+            run([
+                "opera",
+                "tilejson",
+                "--concept-id",
+                "C2617126679-POCLOUD",
+                "--product",
+                "rtc-s1",
+                "--band",
+                "VV",
+                "--expression",
+                "10*log10(b1)",
+                "--rescale",
+                "-30,0",
+                "--url-only",
+                "--json"
+            ]),
+            0
+        );
+        let parsed = Cli::try_parse_from([
+            "opera",
+            "search",
+            "--product",
+            "dswx-hls",
+            "--bbox",
+            "-119.95,35.85,-119.45,36.25",
+        ])
+        .expect("parse negative western-hemisphere bbox");
+        assert!(matches!(parsed.command, Some(Commands::Search { .. })));
     }
 }
