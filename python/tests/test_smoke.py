@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import json
 import subprocess
 import sys
@@ -106,30 +105,26 @@ def test_bundled_cli_and_mcp_server_via_python_module(tmp_path: Path) -> None:
         stderr=subprocess.PIPE,
         text=True,
     )
-    assert mcp_proc.stdin is not None and mcp_proc.stdout is not None
-    try:
-        mcp_proc.stdin.write(
-            json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "tools/call",
-                    "params": {"name": "products", "arguments": {"args": ["--json"]}},
-                }
-            )
-            + "\n"
+    request_line = (
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "products", "arguments": {"args": ["--json"]}},
+            }
         )
-        mcp_proc.stdin.flush()
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            reply_line = pool.submit(mcp_proc.stdout.readline).result(timeout=30)
-        mcp_proc.stdin.close()
-        mcp_proc.wait(timeout=15)
-    except Exception:
+        + "\n"
+    )
+    try:
+        stdout, _stderr = mcp_proc.communicate(input=request_line, timeout=30)
+    except subprocess.TimeoutExpired:
         mcp_proc.kill()
-        mcp_proc.wait(timeout=5)
+        mcp_proc.communicate()
         raise
 
     assert mcp_proc.returncode == 0
+    reply_line = stdout.splitlines()[0]
     reply = json.loads(reply_line)
     assert reply["result"]["isError"] is False
     payload = json.loads(reply["result"]["content"][0]["text"])

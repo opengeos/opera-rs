@@ -31,9 +31,9 @@ Pure-Rust, agent-centric toolkit for searching, visualizing, and analyzing [NASA
 | `OPERA_L3_DIST-ANN-HLS_V1` | `dist-ann` | `rasterio` | `VEG-DIST-STATUS` | Annual 30 m land disturbance summary |
 | `OPERA_L2_RTC-S1_V1` | `rtc-s1` | `rasterio` | `VV`, `HH` | Radiometric terrain-corrected SAR backscatter |
 | `OPERA_L2_RTC-S1-STATIC_V1` | `rtc-s1-static` | `rasterio` | `local_incidence_angle` | Static incidence angle and mask layers |
-| `OPERA_L2_CSLC-S1_V1` | `cslc-s1` | `xarray` | HDF5 | Coregistered Single-Look Complex SAR bursts |
-| `OPERA_L2_CSLC-S1-STATIC_V1` | `cslc-s1-static` | `xarray` | HDF5 | Static line-of-sight geometry layers |
-| `OPERA_L3_DISP-S1_V1` | `disp-s1` | `xarray` | NetCDF/HDF5 | Line-of-sight surface displacement / subsidence |
+| `OPERA_L2_CSLC-S1_V1` | `cslc-s1` | `xarray` | - | Coregistered Single-Look Complex SAR bursts |
+| `OPERA_L2_CSLC-S1-STATIC_V1` | `cslc-s1-static` | `xarray` | - | Static line-of-sight geometry layers |
+| `OPERA_L3_DISP-S1_V1` | `disp-s1` | `xarray` | - | Line-of-sight surface displacement / subsidence |
 
 ## Installation
 

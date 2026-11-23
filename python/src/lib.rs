@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use opera_rs::analysis::{
     ChangeDetectionOptions, TimeSeriesOptions, analyze_time_series, detect_change,
 };
-use opera_rs::cmr::{CmrSearchParams, resolve_concept_id, search_granules};
+use opera_rs::cmr::{CmrSearchParams, resolve_aoi_layer, resolve_concept_id, search_granules};
 use opera_rs::flood_extent::{FloodExtentOptions, derive_flood_extent};
 use opera_rs::geo_io::{inspect_local_raster, read_aoi_bbox, write_feature_collection};
 use opera_rs::geocode::geocode_place;
@@ -198,9 +198,9 @@ fn stats_json(
     histogram_bins: Option<u32>,
     endpoint: Option<String>,
 ) -> PyResult<String> {
-    let prod = find_product(product).map_err(to_py_err)?;
     let parsed_bbox = BBox::from_array(bbox).map_err(to_py_err)?;
-    let (cid, ur, chosen_band) = if let Some(g) = granule_ur {
+    let (prod, cid, ur, chosen_band) = if let Some(g) = granule_ur {
+        let prod = find_product(product).map_err(to_py_err)?;
         let c = match concept_id {
             Some(c) => c,
             None => resolve_concept_id(&prod.short_name, None).map_err(to_py_err)?,
@@ -208,35 +208,22 @@ fn stats_json(
         let b = band
             .or_else(|| prod.default_bands.first().cloned())
             .ok_or_else(|| PyRuntimeError::new_err("specify band"))?;
-        (c, Some(g), b)
+        (prod, c, Some(g), b)
     } else {
-        let search = search_granules(&CmrSearchParams {
-            product: prod.short_name.clone(),
-            bbox: Some(parsed_bbox),
-            start,
-            end,
-            limit: 5,
-            deduplicate_versions: true,
-            newest_per_tile: true,
-            cmr_endpoint: None,
-        })
-        .map_err(to_py_err)?;
-        let first = search
-            .granules
-            .first()
-            .ok_or_else(|| PyRuntimeError::new_err("no matching granules found"))?;
-        let c = concept_id
-            .or_else(|| first.concept_id.clone())
-            .or(search.concept_id)
-            .ok_or_else(|| PyRuntimeError::new_err("missing concept_id"))?;
-        let b = band
-            .or_else(|| prod.choose_band(&first.bands))
-            .ok_or_else(|| PyRuntimeError::new_err("specify band"))?;
-        (c, Some(first.id.clone()), b)
+        let resolved =
+            resolve_aoi_layer(product, parsed_bbox, start, end, 1, band, concept_id, None)
+                .map_err(to_py_err)?;
+        let g_id = resolved.granules.first().map(|g| g.id.clone());
+        (resolved.product, resolved.concept_id, g_id, resolved.band)
     };
 
     let is_cat = categorical.unwrap_or_else(|| {
-        expression.is_none() && is_categorical_band(&prod.short_name, Some(&chosen_band))
+        expression
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+            && is_categorical_band(&prod.short_name, Some(&chosen_band))
     });
     let mut q = TitilerQuery::rasterio(&cid);
     q.endpoint = endpoint.unwrap_or_else(|| DEFAULT_TITILER_ENDPOINT.to_string());
@@ -353,48 +340,27 @@ fn preview_png<'py>(
     output_path: Option<String>,
     endpoint: Option<String>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let prod = find_product(product).map_err(to_py_err)?;
     let parsed_bbox = BBox::from_array(bbox).map_err(to_py_err)?;
-    let search = search_granules(&CmrSearchParams {
-        product: prod.short_name.clone(),
-        bbox: Some(parsed_bbox),
-        start,
-        end,
-        limit: 9,
-        deduplicate_versions: true,
-        newest_per_tile: true,
-        cmr_endpoint: None,
-    })
-    .map_err(to_py_err)?;
-    if search.granules.is_empty() {
-        return Err(PyRuntimeError::new_err("no matching granules found"));
-    }
-    let cid = search
-        .concept_id
-        .clone()
-        .or_else(|| search.granules[0].concept_id.clone())
-        .ok_or_else(|| PyRuntimeError::new_err("missing concept_id"))?;
-    let chosen_band = band
-        .or_else(|| prod.choose_band(&search.granules[0].bands))
-        .ok_or_else(|| PyRuntimeError::new_err("specify band"))?;
+    let resolved = resolve_aoi_layer(product, parsed_bbox, start, end, 3, band, None, None)
+        .map_err(to_py_err)?;
+    let prod = resolved.product;
+    let cid = resolved.concept_id;
+    let chosen_band = resolved.band;
     let style = LayerStyle::for_band(&prod.short_name, Some(&chosen_band), water_only, None, None);
     let ep = endpoint.unwrap_or_else(|| DEFAULT_TITILER_ENDPOINT.to_string());
-    let queries: Vec<TitilerQuery> = search
+    let queries: Vec<TitilerQuery> = resolved
         .granules
         .iter()
-        .take(3)
         .map(|g| {
-            let mut q = TitilerQuery::rasterio(&cid);
-            q.endpoint = ep.clone();
-            q.product = Some(prod.short_name.clone());
-            q.granule_ur = Some(g.id.clone());
-            q.assets = vec![chosen_band.clone()];
-            q.colormap = style.colormap.clone();
-            q.colormap_name = style.colormap_name.clone();
-            if let Some(r) = &style.rescale {
-                q.rescale = vec![r.clone()];
-            }
-            q
+            TitilerQuery::for_granule_band(
+                &ep,
+                &cid,
+                &prod.short_name,
+                &g.id,
+                &chosen_band,
+                None,
+                Some(&style),
+            )
         })
         .collect();
     let mut opts = PreviewOptions::new(parsed_bbox, &prod.short_name, Some(chosen_band));
@@ -445,11 +411,7 @@ fn fetch_tilejson_json(
     if let Some(b) = chosen_band {
         q.assets = vec![b];
     }
-    q.colormap = style.colormap;
-    q.colormap_name = style.colormap_name;
-    if let Some(r) = style.rescale {
-        q.rescale = vec![r];
-    }
+    q.apply_style(&style);
     let tj = fetch_tilejson(&q).map_err(to_py_err)?;
     to_json_string(&tj)
 }
