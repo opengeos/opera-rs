@@ -382,6 +382,39 @@ impl LayerStyle {
         style
     }
 
+    /// Resolves styling for a tile/preview request, dropping default band styling when a custom
+    /// `rio-tiler` `expression` is set unless `rescale_override` or `colormap_override` is given.
+    pub fn for_request(
+        short_name: &str,
+        band: Option<&str>,
+        expression: Option<&str>,
+        water_only: bool,
+        rescale_override: Option<&str>,
+        colormap_override: Option<&str>,
+    ) -> Self {
+        let has_expr = expression.is_some_and(|e| !e.trim().is_empty());
+        if has_expr {
+            return Self {
+                colormap: None,
+                colormap_name: colormap_override
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_ascii_lowercase()),
+                rescale: rescale_override
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string),
+            };
+        }
+        Self::for_band(
+            short_name,
+            band,
+            water_only,
+            rescale_override,
+            colormap_override,
+        )
+    }
+
     fn named(rescale: &str, colormap_name: &str) -> Self {
         Self {
             colormap: None,

@@ -902,14 +902,19 @@ pub fn resolve_aoi_layer(
 
 #[cfg(feature = "http")]
 pub(crate) fn http_agent() -> ureq::Agent {
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(60)))
-        .user_agent(format!(
-            "opera-rs/{} (https://github.com/opengeos/opera-rs)",
-            crate::VERSION
-        ))
-        .build();
-    config.into()
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            let config = ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(60)))
+                .user_agent(format!(
+                    "opera-rs/{} (https://github.com/opengeos/opera-rs)",
+                    crate::VERSION
+                ))
+                .build();
+            config.into()
+        })
+        .clone()
 }
 
 #[cfg(feature = "http")]

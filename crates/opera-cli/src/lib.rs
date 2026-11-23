@@ -20,14 +20,14 @@ use opera_rs::products::{
 };
 use opera_rs::titiler::{
     TitilerQuery, build_tile_url_template, fetch_bbox_statistics, fetch_point, fetch_tilejson,
-    fetch_timeseries_tilejson,
+    fetch_timeseries_tilejson, resolve_titiler_endpoint,
 };
 use opera_rs::types::{BBox, TitilerBackend};
 use opera_rs::viz::{
     PreviewOptions, build_html_tile_layers, export_interactive_html, render_animation_gif,
     render_change_comparison_png, render_preview_png,
 };
-use opera_rs::{DEFAULT_TITILER_ENDPOINT, OperaError, Result};
+use opera_rs::{OperaError, Result};
 use serde_json::{Value, json};
 
 /// Command-line interface for NASA OPERA search, visualization, analysis, and MCP serving.
@@ -88,27 +88,9 @@ impl AoiArgs {
     }
 }
 
-/// Shared `titiler-cmr` endpoint option (defaults to `OPERA_TITILER_ENDPOINT` or OpenGeos endpoint).
-///
-/// Validates that the resolved URL uses `http://` or `https://`.
+/// Shared `titiler-cmr` endpoint resolver (delegates to [`opera_rs::titiler::resolve_titiler_endpoint`]).
 fn resolve_endpoint(explicit: Option<&str>) -> Result<String> {
-    let raw = explicit
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
-        .or_else(|| {
-            std::env::var("OPERA_TITILER_ENDPOINT")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| DEFAULT_TITILER_ENDPOINT.to_string());
-    if !(raw.starts_with("https://") || raw.starts_with("http://")) {
-        return Err(OperaError::InvalidInput(format!(
-            "titiler endpoint must start with http:// or https://, got '{raw}'"
-        )));
-    }
-    Ok(raw)
+    resolve_titiler_endpoint(explicit)
 }
 
 #[derive(Debug, Subcommand)]
@@ -840,9 +822,10 @@ fn dispatch(command: Commands) -> Result<()> {
             let style = prod_name
                 .as_deref()
                 .map(|p| {
-                    LayerStyle::for_band(
+                    LayerStyle::for_request(
                         p,
                         chosen_bands.first().map(String::as_str),
+                        expression.as_deref(),
                         water_only,
                         rescale.as_deref(),
                         colormap.as_deref(),
@@ -1117,6 +1100,9 @@ fn dispatch(command: Commands) -> Result<()> {
                 if let Some(dm) = res.mean_delta {
                     println!("  Band mean delta: {dm:+.4}");
                 }
+                for w in &res.warnings {
+                    println!("  Warning: {w}");
+                }
                 if let Some(p) = preview_out {
                     println!("  Saved comparison preview to {}", p.display());
                 }
@@ -1192,6 +1178,9 @@ fn dispatch(command: Commands) -> Result<()> {
                         "  Note: {} sampled observation(s) failed statistics retrieval.",
                         res.failed_observations.len()
                     );
+                }
+                for w in &res.warnings {
+                    println!("  Warning: {w}");
                 }
                 if let Some(tr) = &res.trend {
                     println!(
@@ -1301,9 +1290,10 @@ fn dispatch(command: Commands) -> Result<()> {
                 )
             };
 
-            let style = LayerStyle::for_band(
+            let style = LayerStyle::for_request(
                 &prod.short_name,
                 Some(&chosen_band),
+                expression.as_deref(),
                 water_only,
                 rescale.as_deref(),
                 colormap.as_deref(),
@@ -1389,7 +1379,7 @@ fn dispatch(command: Commands) -> Result<()> {
             let (bbox, _) = aoi.resolve_required()?;
             let ep = resolve_endpoint(endpoint.as_deref())?;
             let frame_cap = max_frames.clamp(1, 30);
-            let (concept_id, candidates) = fetch_time_series_candidates(
+            let (concept_id, candidates, warnings) = fetch_time_series_candidates(
                 &prod.short_name,
                 bbox,
                 &start,
@@ -1397,6 +1387,11 @@ fn dispatch(command: Commands) -> Result<()> {
                 frame_cap,
                 None,
             )?;
+            if !as_json {
+                for w in &warnings {
+                    eprintln!("warning: {w}");
+                }
+            }
             if candidates.is_empty() {
                 return Err(OperaError::NoResults(format!(
                     "no {} granules found to animate",

@@ -17,6 +17,29 @@ use crate::types::{BBox, TitilerBackend, regex_escape, url_encode};
 /// TileMatrixSet identifier used by `titiler-cmr` XYZ tile endpoints.
 pub const TILE_MATRIX_SET: &str = "WebMercatorQuad";
 
+/// Resolves the `titiler-cmr` endpoint from an explicit override, the `OPERA_TITILER_ENDPOINT`
+/// environment variable, or [`DEFAULT_TITILER_ENDPOINT`], validating an `http://` or `https://`
+/// URL scheme.
+pub fn resolve_titiler_endpoint(explicit: Option<&str>) -> Result<String> {
+    let raw = explicit
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            std::env::var("OPERA_TITILER_ENDPOINT")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_TITILER_ENDPOINT.to_string());
+    if !(raw.starts_with("https://") || raw.starts_with("http://")) {
+        return Err(OperaError::InvalidInput(format!(
+            "titiler endpoint must start with http:// or https://, got '{raw}'"
+        )));
+    }
+    Ok(raw)
+}
+
 /// Common parameters accepted across `titiler-cmr` endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitilerQuery {
