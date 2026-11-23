@@ -32,7 +32,7 @@ pub struct ChangeDetectionOptions {
     pub before_date: String,
     /// Target comparison date (`YYYY-MM-DD`).
     pub after_date: String,
-    /// Search window in days on each side of `before_date` and `after_date` (default: 10).
+    /// Search window in days on each side of `before_date` and `after_date` (required; recommended: 10).
     pub window_days: i64,
     /// Optional band override (defaults to product's preferred band, e.g. `B01_WTR` or `VV`).
     pub band: Option<String>,
@@ -87,6 +87,9 @@ pub struct ChangeDetectionResult {
     pub total_water_delta_km2: Option<f64>,
     pub total_water_percent_change: Option<f64>,
     pub class_deltas: Vec<ClassDelta>,
+    /// Advisory warnings (e.g. when the AOI spans multiple tiles on a selected acquisition date).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl ChangeDetectionResult {
@@ -185,24 +188,6 @@ impl ChangeDetectionResult {
         }
         md
     }
-}
-
-/// Extracts `(open_water_km2, total_water_km2)` from categorical DSWx class statistics.
-pub fn extract_dswx_water_areas(stats: &BandStatistics) -> (Option<f64>, Option<f64>) {
-    if stats.class_breakdown.is_empty() {
-        return (None, None);
-    }
-    let open = stats
-        .class_breakdown
-        .iter()
-        .find(|c| c.class_value == i64::from(DSWX_OPEN_WATER_CLASS))
-        .map_or(0.0, |c| c.area_km2);
-    let partial = stats
-        .class_breakdown
-        .iter()
-        .find(|c| c.class_value == i64::from(DSWX_PARTIAL_WATER_CLASS))
-        .map_or(0.0, |c| c.area_km2);
-    (Some(open), Some(open + partial))
 }
 
 /// Extracts `(open_water_km2, total_water_km2)` from categorical DSWx class statistics.
@@ -318,7 +303,7 @@ pub fn detect_change(opts: &ChangeDetectionOptions) -> Result<ChangeDetectionRes
 
     // Search both halves around `target` (descending before/on target, ascending on/after target)
     // so an exact-date scene is never pushed off page 1 by later acquisitions.
-    let find_near = |target: CalendarDate| -> Result<OperaGranule> {
+    let find_near = |target: CalendarDate| -> Result<(OperaGranule, usize)> {
         let mut candidates = Vec::new();
         let left = search_granules_sorted(
             &CmrSearchParams {
@@ -350,18 +335,39 @@ pub fn detect_change(opts: &ChangeDetectionOptions) -> Result<ChangeDetectionRes
             )?;
             candidates.extend(right.granules);
         }
-        pick_nearest_granule(&candidates, target)
+        let chosen = pick_nearest_granule(&candidates, target)
             .cloned()
             .ok_or_else(|| {
                 OperaError::NoResults(format!(
                     "no {} granules found within +/-{window} days of {target}",
                     prod.short_name
                 ))
-            })
+            })?;
+        let mut same_day_tiles: Vec<&str> = candidates
+            .iter()
+            .filter(|g| g.date == chosen.date && !g.tile.is_empty())
+            .map(|g| g.tile.as_str())
+            .collect();
+        same_day_tiles.sort_unstable();
+        same_day_tiles.dedup();
+        Ok((chosen, same_day_tiles.len()))
     };
 
-    let before_g = find_near(before_target)?;
-    let after_g = find_near(after_target)?;
+    let (before_g, before_tile_count) = find_near(before_target)?;
+    let (after_g, after_tile_count) = find_near(after_target)?;
+    let mut warnings = Vec::new();
+    if before_tile_count > 1 {
+        warnings.push(format!(
+            "baseline date {} spans {} distinct tiles/bursts in the AOI; single-granule statistics cover only granule '{}' (tile {})",
+            before_g.date, before_tile_count, before_g.id, before_g.tile
+        ));
+    }
+    if after_tile_count > 1 {
+        warnings.push(format!(
+            "comparison date {} spans {} distinct tiles/bursts in the AOI; single-granule statistics cover only granule '{}' (tile {})",
+            after_g.date, after_tile_count, after_g.id, after_g.tile
+        ));
+    }
     let concept_id = before_g
         .concept_id
         .clone()
@@ -458,6 +464,7 @@ pub fn detect_change(opts: &ChangeDetectionOptions) -> Result<ChangeDetectionRes
         total_water_delta_km2,
         total_water_percent_change,
         class_deltas,
+        warnings,
     })
 }
 
@@ -476,7 +483,7 @@ pub struct TimeSeriesOptions {
     pub end: String,
     /// Optional minimum day spacing between sampled observations.
     pub interval_days: Option<i64>,
-    /// Maximum number of observations to evaluate (default: 12, capped at 100).
+    /// Maximum number of observations to evaluate (required; recommended: 12, capped at 100).
     pub max_observations: usize,
     pub band: Option<String>,
     pub expression: Option<String>,
@@ -518,6 +525,9 @@ pub struct TimeSeriesResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_observations: Vec<FailedObservation>,
     pub trend: Option<SeriesTrend>,
+    /// Advisory warnings (e.g. when multiple same-day tiles cover the AOI).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 fn csv_escape(field: &str) -> String {
@@ -553,6 +563,7 @@ impl TimeSeriesResult {
 
 /// Samples dated granules chronologically with optional minimum `interval_days` spacing and count cap.
 ///
+/// Keeps one representative granule per acquisition date (sorted deterministically by granule ID).
 /// Granules without a valid `YYYY-MM-DD` acquisition date are excluded regardless of spacing.
 pub fn sample_granules_chronologically(
     granules: Vec<OperaGranule>,
@@ -639,45 +650,42 @@ pub fn compute_series_trend(metric: &str, points: &[(f64, f64)]) -> Option<Serie
     })
 }
 
-/// Runs a multi-date OPERA time-series analysis across `start..=end`.
+/// Retrieves candidate granules across `start..=end`, falling back to evenly spaced sub-windows
+/// when CMR reports more than 500 hits so early acquisitions are not truncated.
+///
+/// Returns `(concept_id, candidate_granules)`.
 #[cfg(feature = "http")]
-pub fn analyze_time_series(opts: &TimeSeriesOptions) -> Result<TimeSeriesResult> {
-    let prod = find_product(&opts.product)?;
-    if !prod.raster_tiles_supported {
-        return Err(OperaError::InvalidInput(format!(
-            "product '{}' uses the '{}' backend (HDF5/NetCDF); analyze_time_series currently supports rasterio COG products (DSWx, DIST, RTC-S1)",
-            prod.short_name, prod.backend
-        )));
-    }
-    let start_date = CalendarDate::parse(&opts.start)?;
-    let end_date = CalendarDate::parse(&opts.end)?;
+pub fn fetch_time_series_candidates(
+    product: &str,
+    bbox: BBox,
+    start: &str,
+    end: &str,
+    target_samples: usize,
+    cmr_endpoint: Option<&str>,
+) -> Result<(Option<String>, Vec<OperaGranule>)> {
+    let prod = find_product(product)?;
+    let start_date = CalendarDate::parse(start)?;
+    let end_date = CalendarDate::parse(end)?;
     if start_date > end_date {
         return Err(OperaError::InvalidInput(format!(
             "start date {start_date} must be on or before end date {end_date}"
         )));
     }
-    let aoi = opts
-        .aoi_geojson
-        .clone()
-        .unwrap_or_else(|| opts.bbox.to_geojson_feature());
-
-    let mut candidate_granules = Vec::new();
     let search = search_granules(&CmrSearchParams {
         product: prod.short_name.clone(),
-        bbox: Some(opts.bbox),
-        start: Some(opts.start.clone()),
-        end: Some(opts.end.clone()),
+        bbox: Some(bbox),
+        start: Some(start.to_string()),
+        end: Some(end.to_string()),
         limit: 500,
         deduplicate_versions: true,
         newest_per_tile: false,
-        cmr_endpoint: opts.cmr_endpoint.clone(),
+        cmr_endpoint: cmr_endpoint.map(ToString::to_string),
     })?;
     let mut concept_id = search.concept_id.clone();
-    // If CMR has more than 500 hits in the range, also sample across evenly spaced sub-windows
-    // so early dates in long intervals are not truncated.
-    if search.hits > 500 && opts.max_observations > 1 {
+    let mut candidate_granules = Vec::new();
+    if search.hits > 500 && target_samples > 1 {
         let total_days = end_date.days_between(start_date).max(1);
-        let buckets = opts.max_observations.clamp(2, 24) as i64;
+        let buckets = target_samples.clamp(2, 24) as i64;
         let step = (total_days / buckets).max(1);
         for i in 0..buckets {
             let b_start = start_date.add_days(i * step);
@@ -689,13 +697,13 @@ pub fn analyze_time_series(opts: &TimeSeriesOptions) -> Result<TimeSeriesResult>
             if let Ok(sub) = search_granules_sorted(
                 &CmrSearchParams {
                     product: prod.short_name.clone(),
-                    bbox: Some(opts.bbox),
+                    bbox: Some(bbox),
                     start: Some(b_start.to_string()),
                     end: Some(b_end.to_string()),
                     limit: 5,
                     deduplicate_versions: true,
                     newest_per_tile: false,
-                    cmr_endpoint: opts.cmr_endpoint.clone(),
+                    cmr_endpoint: cmr_endpoint.map(ToString::to_string),
                 },
                 true,
             ) {
@@ -708,6 +716,44 @@ pub fn analyze_time_series(opts: &TimeSeriesOptions) -> Result<TimeSeriesResult>
     } else {
         candidate_granules = search.granules;
     }
+    Ok((concept_id, candidate_granules))
+}
+
+#[cfg(not(feature = "http"))]
+pub fn fetch_time_series_candidates(
+    _product: &str,
+    _bbox: BBox,
+    _start: &str,
+    _end: &str,
+    _target_samples: usize,
+    _cmr_endpoint: Option<&str>,
+) -> Result<(Option<String>, Vec<OperaGranule>)> {
+    Err(OperaError::HttpDisabled)
+}
+
+/// Runs a multi-date OPERA time-series analysis across `start..=end`.
+#[cfg(feature = "http")]
+pub fn analyze_time_series(opts: &TimeSeriesOptions) -> Result<TimeSeriesResult> {
+    let prod = find_product(&opts.product)?;
+    if !prod.raster_tiles_supported {
+        return Err(OperaError::InvalidInput(format!(
+            "product '{}' uses the '{}' backend (HDF5/NetCDF); analyze_time_series currently supports rasterio COG products (DSWx, DIST, RTC-S1)",
+            prod.short_name, prod.backend
+        )));
+    }
+    let aoi = opts
+        .aoi_geojson
+        .clone()
+        .unwrap_or_else(|| opts.bbox.to_geojson_feature());
+
+    let (concept_id, candidate_granules) = fetch_time_series_candidates(
+        &prod.short_name,
+        opts.bbox,
+        &opts.start,
+        &opts.end,
+        opts.max_observations,
+        opts.cmr_endpoint.as_deref(),
+    )?;
 
     if candidate_granules.is_empty() {
         return Err(OperaError::NoResults(format!(
@@ -719,6 +765,26 @@ pub fn analyze_time_series(opts: &TimeSeriesOptions) -> Result<TimeSeriesResult>
     let concept_id = concept_id
         .or_else(|| candidate_granules.iter().find_map(|g| g.concept_id.clone()))
         .ok_or_else(|| OperaError::NoResults("granules missing collection concept_id".into()))?;
+
+    // Check whether any acquisition date has multiple distinct tiles covering the AOI.
+    let mut tiles_per_date: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for g in &candidate_granules {
+        if !g.date.is_empty() && !g.tile.is_empty() {
+            tiles_per_date
+                .entry(g.date.clone())
+                .or_default()
+                .insert(g.tile.clone());
+        }
+    }
+    let multi_tile_dates = tiles_per_date.values().filter(|s| s.len() > 1).count();
+    let mut warnings = Vec::new();
+    if multi_tile_dates > 0 {
+        warnings.push(format!(
+            "{multi_tile_dates} acquisition date(s) span multiple tiles/bursts in the AOI; each observation evaluates one representative granule per date"
+        ));
+    }
+
     let sampled = sample_granules_chronologically(
         candidate_granules,
         opts.interval_days,
@@ -837,6 +903,7 @@ pub fn analyze_time_series(opts: &TimeSeriesOptions) -> Result<TimeSeriesResult>
         observations,
         failed_observations,
         trend,
+        warnings,
     })
 }
 

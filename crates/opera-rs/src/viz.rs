@@ -295,6 +295,7 @@ pub fn decorate_preview(img: &mut RgbaImage, opts: &PreviewOptions) {
         fill_rect(img, bx + 8, by + 17, bar_px / 2, 5, [56, 189, 248, 255]);
     }
 
+    let mut legend_height = 0usize;
     if opts.legend {
         let entries = legend_entries(&opts.product, opts.band.as_deref(), opts.water_only);
         if !entries.is_empty() && img.width >= 200 && img.height >= 120 {
@@ -309,7 +310,18 @@ pub fn decorate_preview(img: &mut RgbaImage, opts: &PreviewOptions) {
                 fill_rect(img, lx + 8, row_y, 12, 10, *color);
                 draw_text(img, lx + 26, row_y + 1, label, [255, 255, 255, 255], 1);
             }
+            legend_height = box_h + 16;
         }
+    }
+
+    if opts.basemap && img.width >= 160 && img.height >= 64 {
+        let attr = "(C) OSM & CARTO";
+        let box_w = attr.len() * 6 + 12;
+        let box_h = 15;
+        let ax = img.width.saturating_sub(box_w + 12);
+        let ay = img.height.saturating_sub(box_h + 8 + legend_height).max(8);
+        fill_rect(img, ax, ay, box_w, box_h, [15, 23, 42, 175]);
+        draw_text(img, ax + 6, ay + 4, attr, [226, 232, 240, 255], 1);
     }
 }
 
@@ -580,8 +592,8 @@ pub fn build_interactive_html(
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>{safe_title}</title>
-<link href="https://unpkg.com/maplibre-gl@5.2.0/dist/maplibre-gl.css" rel="stylesheet" />
-<script src="https://unpkg.com/maplibre-gl@5.2.0/dist/maplibre-gl.js"></script>
+<link href="https://unpkg.com/maplibre-gl@5.2.0/dist/maplibre-gl.css" rel="stylesheet" integrity="sha384-Nq6PQ+9vJPvw7U/VfDELyrWoGQMsy0gi6QShhaSrGzkpF5KkM40csg2leky+YMTd" crossorigin="anonymous" />
+<script src="https://unpkg.com/maplibre-gl@5.2.0/dist/maplibre-gl.js" integrity="sha384-VMpBpZqwtNOdABxFshfUPnyuqncfZtE0j1evmoWakxTDQ+me3EE4G48K/+dSDxSX" crossorigin="anonymous"></script>
 <style>
   html, body, #map {{ margin: 0; padding: 0; width: 100%; height: 100%; font-family: system-ui, sans-serif; }}
   .panel {{

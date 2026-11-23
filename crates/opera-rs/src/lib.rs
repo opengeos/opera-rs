@@ -23,10 +23,11 @@ pub mod viz;
 pub use analysis::{
     ChangeDetectionOptions, ChangeDetectionResult, ClassDelta, FailedObservation,
     ObservationSummary, SeriesTrend, TimeSeriesOptions, TimeSeriesResult, analyze_time_series,
-    detect_change,
+    detect_change, fetch_time_series_candidates,
 };
 pub use cmr::{
-    CmrSearchParams, GranuleSearchResult, OperaGranule, resolve_concept_id, search_granules,
+    CmrSearchParams, GranuleSearchResult, OperaGranule, ResolvedAoiLayer, resolve_aoi_layer,
+    resolve_concept_id, search_granules,
 };
 pub use error::{OperaError, Result};
 pub use flood_extent::{FloodExtentOptions, FloodExtentResult, derive_flood_extent};
@@ -63,3 +64,15 @@ pub const DEFAULT_CMR_ENDPOINT: &str = "https://cmr.earthdata.nasa.gov/search";
 
 /// Default `titiler-cmr` endpoint (handles Earthdata authentication server-side).
 pub const DEFAULT_TITILER_ENDPOINT: &str = "https://titiler-cmr.opengeos.org";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exposes_version_and_default_endpoints() {
+        assert!(!VERSION.is_empty());
+        assert!(DEFAULT_CMR_ENDPOINT.starts_with("https://"));
+        assert!(DEFAULT_TITILER_ENDPOINT.starts_with("https://"));
+    }
+}
