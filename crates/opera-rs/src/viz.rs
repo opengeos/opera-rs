@@ -496,7 +496,8 @@ pub fn render_change_comparison_png(
     endpoint: &str,
     expression: Option<&str>,
 ) -> Result<Vec<u8>> {
-    let style = LayerStyle::for_band(&res.product, Some(&res.band), true, None, None);
+    let style =
+        LayerStyle::for_request(&res.product, Some(&res.band), expression, true, None, None);
     let b_query = TitilerQuery::for_granule_band(
         endpoint,
         &res.concept_id,
