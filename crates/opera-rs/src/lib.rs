@@ -21,8 +21,9 @@ pub mod types;
 pub mod viz;
 
 pub use analysis::{
-    ChangeDetectionOptions, ChangeDetectionResult, ClassDelta, ObservationSummary, SeriesTrend,
-    TimeSeriesOptions, TimeSeriesResult, analyze_time_series, detect_change,
+    ChangeDetectionOptions, ChangeDetectionResult, ClassDelta, FailedObservation,
+    ObservationSummary, SeriesTrend, TimeSeriesOptions, TimeSeriesResult, analyze_time_series,
+    detect_change,
 };
 pub use cmr::{
     CmrSearchParams, GranuleSearchResult, OperaGranule, resolve_concept_id, search_granules,

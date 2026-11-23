@@ -77,27 +77,62 @@ pub struct OperaGranule {
     pub tile: String,
     /// Combined WGS 84 bounding box of the granule footprint.
     pub bbox: Option<BBox>,
-    /// Closed coordinate rings (`[lon, lat]`) forming a Polygon (1 ring) or MultiPolygon (>1).
+    /// Closed exterior coordinate rings (`[lon, lat]`) forming a Polygon (1 ring) or MultiPolygon (>1).
     pub rings: Vec<Vec<[f64; 2]>>,
+    /// Optional interior exclusion rings (holes) parallel to `rings`, from UMM-G `ExclusiveZone`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<Vec<Vec<[f64; 2]>>>,
     /// Deduplicated GeoTIFF band/layer tokens (e.g. `B01_WTR`, `VV`, `VEG-DIST-STATUS`).
     pub bands: Vec<String>,
     /// HTTPS raster data links (`*.tif`, `*.tiff`, `*.h5`, `*.nc`).
     pub data_links: Vec<String>,
 }
 
+fn ring_signed_area(ring: &[[f64; 2]]) -> f64 {
+    let mut a = 0.0;
+    for w in ring.windows(2) {
+        a += w[0][0] * w[1][1] - w[1][0] * w[0][1];
+    }
+    a * 0.5
+}
+
+fn normalize_ring_winding(ring: &[[f64; 2]], ccw: bool) -> Vec<[f64; 2]> {
+    let is_ccw = ring_signed_area(ring) > 0.0;
+    if is_ccw == ccw {
+        ring.to_vec()
+    } else {
+        ring.iter().copied().rev().collect()
+    }
+}
+
 impl OperaGranule {
-    /// Converts this granule's footprint into a GeoJSON `Feature`.
+    /// Converts this granule's footprint into an RFC 7946 GeoJSON `Feature`
+    /// (CCW exterior rings, CW exclusion holes).
     pub fn to_geojson_feature(&self) -> Option<Value> {
         if self.rings.is_empty() {
             return None;
         }
+        let build_poly = |idx: usize, ext: &Vec<[f64; 2]>| -> Vec<Vec<[f64; 2]>> {
+            let mut poly = vec![normalize_ring_winding(ext, true)];
+            if let Some(poly_holes) = self.holes.get(idx) {
+                for hole in poly_holes {
+                    poly.push(normalize_ring_winding(hole, false));
+                }
+            }
+            poly
+        };
         let geometry = if self.rings.len() == 1 {
             json!({
                 "type": "Polygon",
-                "coordinates": [&self.rings[0]]
+                "coordinates": build_poly(0, &self.rings[0])
             })
         } else {
-            let polys: Vec<Vec<&Vec<[f64; 2]>>> = self.rings.iter().map(|r| vec![r]).collect();
+            let polys: Vec<Vec<Vec<[f64; 2]>>> = self
+                .rings
+                .iter()
+                .enumerate()
+                .map(|(i, r)| build_poly(i, r))
+                .collect();
             json!({
                 "type": "MultiPolygon",
                 "coordinates": polys
@@ -170,9 +205,38 @@ pub fn build_granule_search_url(
     page_size: usize,
     page_num: usize,
 ) -> Result<String> {
+    build_granule_search_url_sorted(
+        cmr_endpoint,
+        short_name,
+        bbox,
+        start,
+        end,
+        page_size,
+        page_num,
+        false,
+    )
+}
+
+/// Builds a paginated CMR UMM-G granule search URL with selectable chronological sort order.
+#[allow(clippy::too_many_arguments)]
+pub fn build_granule_search_url_sorted(
+    cmr_endpoint: &str,
+    short_name: &str,
+    bbox: Option<BBox>,
+    start: Option<&str>,
+    end: Option<&str>,
+    page_size: usize,
+    page_num: usize,
+    ascending: bool,
+) -> Result<String> {
     let base = cmr_endpoint.trim_end_matches('/');
+    let sort_key = if ascending {
+        "start_date"
+    } else {
+        "-start_date"
+    };
     let mut url = format!(
-        "{base}/granules.umm_json?short_name={}&page_size={}&page_num={}&sort_key=-start_date",
+        "{base}/granules.umm_json?short_name={}&page_size={}&page_num={}&sort_key={sort_key}",
         url_encode(short_name),
         page_size.clamp(1, 200),
         page_num.max(1)
@@ -317,6 +381,15 @@ struct UmmGeometry {
 struct UmmGPolygon {
     #[serde(default)]
     boundary: UmmBoundary,
+    #[serde(default)]
+    exclusive_zone: Option<UmmExclusiveZone>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct UmmExclusiveZone {
+    #[serde(default)]
+    boundaries: Vec<UmmBoundary>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -348,8 +421,12 @@ struct UmmRelatedUrl {
     url: Option<String>,
 }
 
+fn url_path_without_query(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
+}
+
 fn is_raster_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
+    let lower = url_path_without_query(url).to_ascii_lowercase();
     lower.ends_with(".tif")
         || lower.ends_with(".tiff")
         || lower.ends_with(".h5")
@@ -361,7 +438,8 @@ fn is_raster_url(url: &str) -> bool {
 /// Extracts the GeoTIFF band/layer token from an OPERA data URL (e.g. `B01_WTR`, `VV`,
 /// `VEG-DIST-STATUS`, `local_incidence_angle`). Returns `None` for non-GeoTIFF URLs.
 pub fn extract_band_token(url: &str, granule_ur: &str) -> Option<String> {
-    let filename = url.rsplit('/').next()?;
+    let path = url_path_without_query(url);
+    let filename = path.rsplit('/').next()?;
     let lower = filename.to_ascii_lowercase();
     let stem = if lower.ends_with(".tiff") {
         &filename[..filename.len() - 5]
@@ -396,30 +474,58 @@ pub fn extract_band_token(url: &str, granule_ur: &str) -> Option<String> {
     (!token.is_empty()).then(|| token.to_string())
 }
 
-fn parse_rings(geo: &UmmGeometry) -> Vec<Vec<[f64; 2]>> {
+fn close_boundary(boundary: &UmmBoundary) -> Option<Vec<[f64; 2]>> {
+    let mut ring: Vec<[f64; 2]> = boundary
+        .points
+        .iter()
+        .map(|p| [p.longitude, p.latitude])
+        .collect();
+    if ring.len() < 3 {
+        return None;
+    }
+    if ring.first() != ring.last() {
+        ring.push(ring[0]);
+    }
+    Some(ring)
+}
+
+type RingCoords = Vec<[f64; 2]>;
+type RingsAndHoles = (Vec<RingCoords>, Vec<Vec<RingCoords>>);
+
+fn parse_rings_and_holes(geo: &UmmGeometry) -> RingsAndHoles {
     let mut rings = Vec::new();
+    let mut holes = Vec::new();
     for poly in &geo.gpolygons {
-        let mut ring: Vec<[f64; 2]> = poly
-            .boundary
-            .points
-            .iter()
-            .map(|p| [p.longitude, p.latitude])
-            .collect();
-        if ring.len() >= 3 {
-            if ring.first() != ring.last() {
-                ring.push(ring[0]);
-            }
-            rings.push(ring);
+        if let Some(ext) = close_boundary(&poly.boundary) {
+            let poly_holes: Vec<Vec<[f64; 2]>> = poly
+                .exclusive_zone
+                .as_ref()
+                .map(|ez| ez.boundaries.iter().filter_map(close_boundary).collect())
+                .unwrap_or_default();
+            rings.push(ext);
+            holes.push(poly_holes);
         }
     }
     if rings.is_empty() {
         for r in &geo.bounding_rectangles {
             let (w, s) = (r.west_bounding_coordinate, r.south_bounding_coordinate);
             let (e, n) = (r.east_bounding_coordinate, r.north_bounding_coordinate);
-            rings.push(vec![[w, s], [e, s], [e, n], [w, n], [w, s]]);
+            if w > e {
+                // Antimeridian-crossing rectangle: split into [w..180] and [-180..e].
+                rings.push(vec![[w, s], [180.0, s], [180.0, n], [w, n], [w, s]]);
+                holes.push(Vec::new());
+                rings.push(vec![[-180.0, s], [e, s], [e, n], [-180.0, n], [-180.0, s]]);
+                holes.push(Vec::new());
+            } else {
+                rings.push(vec![[w, s], [e, s], [e, n], [w, n], [w, s]]);
+                holes.push(Vec::new());
+            }
         }
     }
-    rings
+    if holes.iter().all(Vec::is_empty) {
+        holes.clear();
+    }
+    (rings, holes)
 }
 
 fn rings_bbox(rings: &[Vec<[f64; 2]>]) -> Option<BBox> {
@@ -468,7 +574,8 @@ pub(crate) fn parse_umm_granule(item: &UmmGranuleItem, product: &str) -> Option<
     let time = date_ref.get(11..16).unwrap_or("").to_string();
     let tile = id.split('_').nth(3).unwrap_or("").to_string();
 
-    let rings = parse_rings(&item.umm.spatial_extent.horizontal_spatial_domain.geometry);
+    let (rings, holes) =
+        parse_rings_and_holes(&item.umm.spatial_extent.horizontal_spatial_domain.geometry);
     let bbox = rings_bbox(&rings);
 
     let mut data_links = Vec::new();
@@ -503,20 +610,31 @@ pub(crate) fn parse_umm_granule(item: &UmmGranuleItem, product: &str) -> Option<
         tile,
         bbox,
         rings,
+        holes,
         bands,
         data_links,
     })
 }
 
-/// Parses a raw UMM-G JSON page returned by CMR into `(hits, Vec<OperaGranule>)`.
-pub fn parse_granule_page_json(json_str: &str, product: &str) -> Result<(u64, Vec<OperaGranule>)> {
+/// Parses a raw UMM-G JSON page returned by CMR into `(hits, raw_item_count, Vec<OperaGranule>)`.
+pub(crate) fn parse_granule_page_with_raw_count(
+    json_str: &str,
+    product: &str,
+) -> Result<(u64, usize, Vec<OperaGranule>)> {
     let page: UmmGranulePage = serde_json::from_str(json_str)?;
+    let raw_count = page.items.len();
     let granules = page
         .items
         .iter()
         .filter_map(|item| parse_umm_granule(item, product))
         .collect();
-    Ok((page.hits, granules))
+    Ok((page.hits, raw_count, granules))
+}
+
+/// Parses a raw UMM-G JSON page returned by CMR into `(hits, Vec<OperaGranule>)`.
+pub fn parse_granule_page_json(json_str: &str, product: &str) -> Result<(u64, Vec<OperaGranule>)> {
+    let (hits, _, granules) = parse_granule_page_with_raw_count(json_str, product)?;
+    Ok((hits, granules))
 }
 
 /// Chronological sort key for ISO-8601 UTC timestamps, handling fractional seconds consistently.
@@ -631,6 +749,15 @@ pub fn resolve_concept_id(_product: &str, _cmr_endpoint: Option<&str>) -> Result
 /// Searches public NASA CMR for OPERA granules matching `params`.
 #[cfg(feature = "http")]
 pub fn search_granules(params: &CmrSearchParams) -> Result<GranuleSearchResult> {
+    search_granules_sorted(params, false)
+}
+
+/// Searches public NASA CMR for OPERA granules with selectable chronological sort order.
+#[cfg(feature = "http")]
+pub(crate) fn search_granules_sorted(
+    params: &CmrSearchParams,
+    ascending: bool,
+) -> Result<GranuleSearchResult> {
     let short_name = match find_product(&params.product) {
         Ok(p) => p.short_name,
         Err(_) => params.product.trim().to_string(),
@@ -641,13 +768,14 @@ pub fn search_granules(params: &CmrSearchParams) -> Result<GranuleSearchResult> 
         .unwrap_or(DEFAULT_CMR_ENDPOINT);
     let target_limit = params.limit.clamp(1, 500);
     let page_size = target_limit.min(CMR_PAGE_SIZE);
-    let max_pages = target_limit.div_ceil(page_size).max(1);
+    let max_pages = target_limit.div_ceil(page_size).max(1) + 2;
 
     let mut all_granules = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
     let mut total_hits = 0u64;
 
     for page_num in 1..=max_pages {
-        let url = build_granule_search_url(
+        let url = build_granule_search_url_sorted(
             endpoint,
             &short_name,
             params.bbox,
@@ -655,15 +783,20 @@ pub fn search_granules(params: &CmrSearchParams) -> Result<GranuleSearchResult> 
             params.end.as_deref(),
             page_size,
             page_num,
+            ascending,
         )?;
         let body = http_get_text(&url)?;
-        let (hits, page_granules) = parse_granule_page_json(&body, &short_name)?;
+        let (hits, raw_count, page_granules) =
+            parse_granule_page_with_raw_count(&body, &short_name)?;
         if page_num == 1 {
             total_hits = hits;
         }
-        let fetched = page_granules.len();
-        all_granules.extend(page_granules);
-        if fetched < page_size || all_granules.len() >= target_limit {
+        for g in page_granules {
+            if seen_ids.insert(g.id.clone()) {
+                all_granules.push(g);
+            }
+        }
+        if raw_count < page_size || all_granules.len() >= target_limit {
             break;
         }
     }
@@ -849,7 +982,7 @@ mod tests {
         .unwrap();
         assert!(url.contains("short_name=OPERA_L3_DSWX-HLS_V1"));
         assert!(url.contains("bounding_box=-119.9%2C35.8%2C-119.4%2C36.3"));
-        assert!(url.contains("temporal=2023-04-01T00%3A00%3A00Z%2C2023-04-30T23%3A59%3A59Z"));
+        assert!(url.contains("temporal=2023-04-01T00%3A00%3A00Z%2C2023-04-30T23%3A59%3A59.999Z"));
 
         assert!(
             build_granule_search_url(

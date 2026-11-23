@@ -33,8 +33,9 @@ pub const DSWX_WTR_COLORMAP_JSON: &str = r#"{"0":[0,0,0,0],"1":[0,0,255,255],"2"
 /// hiding clouds, snow/ice, ocean mask, not-water, and fill.
 pub const DSWX_WTR_WATER_ONLY_COLORMAP_JSON: &str = r#"{"0":[0,0,0,0],"1":[0,0,255,255],"2":[135,206,250,255],"252":[0,0,0,0],"253":[0,0,0,0],"254":[0,0,0,0],"255":[0,0,0,0]}"#;
 
-/// DIST-ALERT / DIST-ANN `VEG-DIST-STATUS` categorical colormap JSON.
-pub const DIST_STATUS_COLORMAP_JSON: &str = r#"{"0":[0,0,0,0],"1":[255,255,178,255],"2":[254,204,92,255],"3":[253,141,60,255],"4":[240,59,32,255],"5":[220,30,30,255],"6":[189,0,38,255],"7":[150,150,150,255],"8":[90,90,90,255],"255":[0,0,0,0]}"#;
+/// DIST-ALERT / DIST-ANN `VEG-DIST-STATUS` / `GEN-DIST-STATUS` categorical colormap JSON
+/// (includes classes 9 and 10 for DIST-ANN confirmed previous-year disturbance).
+pub const DIST_STATUS_COLORMAP_JSON: &str = r#"{"0":[0,0,0,0],"1":[255,255,178,255],"2":[254,204,92,255],"3":[253,141,60,255],"4":[240,59,32,255],"5":[220,30,30,255],"6":[189,0,38,255],"7":[150,150,150,255],"8":[90,90,90,255],"9":[128,0,128,255],"10":[75,0,130,255],"255":[0,0,0,0]}"#;
 
 /// Metadata and default rendering settings for a NASA OPERA product.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,11 +409,32 @@ pub fn is_dswx_water_band(short_name: &str, band: Option<&str>) -> bool {
     short_name.to_ascii_uppercase().contains("DSWX") && band.to_ascii_uppercase().contains("WTR")
 }
 
-/// Returns a human-readable class label for categorical OPERA bands (DSWx WTR or DIST STATUS).
+/// Returns `true` when the product/band is an OPERA DSWx binary water layer (`BWTR`).
+pub fn is_dswx_binary_water_band(short_name: &str, band: Option<&str>) -> bool {
+    let Some(band) = band else {
+        return false;
+    };
+    short_name.to_ascii_uppercase().contains("DSWX") && band.to_ascii_uppercase().contains("BWTR")
+}
+
+/// Returns a human-readable class label for categorical OPERA bands (DSWx WTR/BWTR or DIST STATUS).
 pub fn class_label(short_name: &str, band: Option<&str>, class_value: i64) -> Option<&'static str> {
     let p = short_name.to_ascii_uppercase();
     let b = band.unwrap_or_default().to_ascii_uppercase();
     if p.contains("DSWX") && (b.is_empty() || b.contains("WTR")) {
+        if b.contains("BWTR") {
+            return match class_value {
+                0 => Some("Not water"),
+                1 => Some("Water (open or partial)"),
+                250 => Some("Hand-masked / terrain shadow"),
+                251 => Some("Layover / shadow"),
+                252 => Some("Snow / ice"),
+                253 => Some("Cloud / cloud shadow"),
+                254 => Some("Ocean masked"),
+                255 => Some("No data / fill"),
+                _ => None,
+            };
+        }
         return match class_value {
             0 => Some("Not water"),
             1 => Some("Open water"),
@@ -428,6 +450,23 @@ pub fn class_label(short_name: &str, band: Option<&str>, class_value: i64) -> Op
         };
     }
     if p.contains("DIST") && (b.is_empty() || b.contains("STATUS")) {
+        if b.starts_with("GEN") {
+            return match class_value {
+                0 => Some("No disturbance"),
+                1 => Some("First generic disturbance (low)"),
+                2 => Some("Provisional generic disturbance (low)"),
+                3 => Some("Confirmed generic disturbance (low)"),
+                4 => Some("First generic disturbance (high)"),
+                5 => Some("Provisional generic disturbance (high)"),
+                6 => Some("Confirmed generic disturbance (high)"),
+                7 => Some("Finished generic disturbance (low)"),
+                8 => Some("Finished generic disturbance (high)"),
+                9 => Some("Confirmed previous-year generic disturbance (low)"),
+                10 => Some("Confirmed previous-year generic disturbance (high)"),
+                255 => Some("No data / fill"),
+                _ => None,
+            };
+        }
         return match class_value {
             0 => Some("No disturbance"),
             1 => Some("First detection (<50% loss)"),
@@ -438,6 +477,8 @@ pub fn class_label(short_name: &str, band: Option<&str>, class_value: i64) -> Op
             6 => Some("Confirmed (>=50% loss)"),
             7 => Some("Finished (<50% loss)"),
             8 => Some("Finished (>=50% loss)"),
+            9 => Some("Confirmed previous-year (<50% loss)"),
+            10 => Some("Confirmed previous-year (>=50% loss)"),
             255 => Some("No data / fill"),
             _ => None,
         };

@@ -18,7 +18,7 @@ use terrio::{
 };
 
 use crate::error::{OperaError, Result};
-use crate::products::{OPERA_PIXEL_AREA_KM2, class_label, is_categorical_band};
+use crate::products::{OPERA_PIXEL_AREA_KM2, class_label, find_product, is_categorical_band};
 use crate::titiler::ClassBreakdown;
 use crate::types::BBox;
 
@@ -33,7 +33,7 @@ pub fn read_aoi_bbox(path: impl AsRef<Path>) -> Result<BBox> {
     let p = path_str(path.as_ref())?;
     let ds = terrio::open_vector(p, &VectorOpenOptions::default())?;
     let wgs84 = SpatialRef::parse("EPSG:4326")?;
-    let mut combined: Option<BBox> = None;
+    let mut raw_bounds: Option<(f64, f64, f64, f64)> = None;
 
     for layer in ds.layers {
         let reprojected = match &layer.crs {
@@ -41,20 +41,20 @@ pub fn read_aoi_bbox(path: impl AsRef<Path>) -> Result<BBox> {
             _ => layer,
         };
         if let Some((min_x, min_y, max_x, max_y)) = layer_extent(&reprojected) {
-            let b = BBox::new(min_x, min_y, max_x, max_y)?;
-            combined = Some(match combined {
-                Some(acc) => acc.union(b),
-                None => b,
+            raw_bounds = Some(match raw_bounds {
+                Some((w, s, e, n)) => (w.min(min_x), s.min(min_y), e.max(max_x), n.max(max_y)),
+                None => (min_x, min_y, max_x, max_y),
             });
         }
     }
 
-    combined.ok_or_else(|| {
+    let (w, s, e, n) = raw_bounds.ok_or_else(|| {
         OperaError::NoResults(format!(
             "no vector geometries found in '{}'",
             path.as_ref().display()
         ))
-    })
+    })?;
+    BBox::new(w, s, e, n)
 }
 
 /// Writes a GeoJSON `FeatureCollection` to disk.
@@ -98,42 +98,90 @@ pub fn write_feature_collection(
     layer.crs = Some(Crs::new().with_epsg(4326));
     layer.geom_type = Some(GeometryType::MultiPolygon);
 
-    // Collect union of scalar property keys from features.
-    let mut field_names: Vec<String> = Vec::new();
+    // Infer field types across all features so numeric and boolean properties keep native types.
+    let mut field_order: Vec<String> = Vec::new();
+    let mut field_types: BTreeMap<String, Option<FieldType>> = BTreeMap::new();
     for feat in feats {
         if let Some(props) = feat.get("properties").and_then(Value::as_object) {
-            for k in props.keys() {
-                if !field_names.iter().any(|existing| existing == k) {
-                    field_names.push(k.clone());
+            for (k, v) in props {
+                if !field_types.contains_key(k) {
+                    field_order.push(k.clone());
+                    field_types.insert(k.clone(), None);
+                }
+                let inferred = match v {
+                    Value::Null => None,
+                    Value::Bool(_) => Some(FieldType::Boolean),
+                    Value::Number(n) if n.is_i64() => Some(FieldType::Integer),
+                    Value::Number(_) => Some(FieldType::Float),
+                    _ => Some(FieldType::Text),
+                };
+                if let Some(ft) = inferred {
+                    let entry = field_types.get_mut(k).unwrap();
+                    *entry = Some(match *entry {
+                        None => ft,
+                        Some(cur) if cur == ft => cur,
+                        Some(FieldType::Integer) if ft == FieldType::Float => FieldType::Float,
+                        Some(FieldType::Float) if ft == FieldType::Integer => FieldType::Float,
+                        Some(_) => FieldType::Text,
+                    });
                 }
             }
         }
     }
-    for name in &field_names {
-        layer.schema.add_field(FieldDef::new(name, FieldType::Text));
+    let resolved_fields: Vec<(String, FieldType)> = field_order
+        .into_iter()
+        .map(|name| {
+            let ft = field_types
+                .get(&name)
+                .copied()
+                .flatten()
+                .unwrap_or(FieldType::Text);
+            (name, ft)
+        })
+        .collect();
+    for (name, ft) in &resolved_fields {
+        layer.schema.add_field(FieldDef::new(name, *ft));
     }
 
     for (idx, feat) in feats.iter().enumerate() {
-        let Some(geom_val) = feat.get("geometry") else {
-            continue;
-        };
-        let Some(geometry) = geojson_to_terrio_geometry(geom_val) else {
-            continue;
+        let geom_val = feat.get("geometry").ok_or_else(|| {
+            OperaError::InvalidInput(format!("GeoJSON feature {idx} missing 'geometry' field"))
+        })?;
+        let geometry = if geom_val.is_null() {
+            None
+        } else {
+            let gtype = geom_val
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("<missing>");
+            let g = geojson_to_terrio_geometry(geom_val).ok_or_else(|| {
+                OperaError::InvalidInput(format!(
+                    "unsupported or malformed GeoJSON geometry type '{gtype}' at feature {idx} (expected Polygon or MultiPolygon)"
+                ))
+            })?;
+            Some(g)
         };
         let props = feat.get("properties").and_then(Value::as_object);
-        let attributes: Vec<FieldValue> = field_names
+        let attributes: Vec<FieldValue> = resolved_fields
             .iter()
-            .map(|k| match props.and_then(|m| m.get(k)) {
-                None | Some(Value::Null) => FieldValue::Null,
-                Some(Value::String(s)) => FieldValue::Text(s.clone()),
-                Some(Value::Bool(b)) => FieldValue::Text(b.to_string()),
-                Some(Value::Number(n)) => FieldValue::Text(n.to_string()),
-                Some(other) => FieldValue::Text(other.to_string()),
+            .map(|(k, ft)| match (props.and_then(|m| m.get(k)), ft) {
+                (None | Some(Value::Null), _) => FieldValue::Null,
+                (Some(Value::Bool(b)), FieldType::Boolean) => FieldValue::Boolean(*b),
+                (Some(Value::Number(n)), FieldType::Integer) => n
+                    .as_i64()
+                    .map(FieldValue::Integer)
+                    .unwrap_or_else(|| FieldValue::Text(n.to_string())),
+                (Some(Value::Number(n)), FieldType::Float) => n
+                    .as_f64()
+                    .map(FieldValue::Float)
+                    .unwrap_or_else(|| FieldValue::Text(n.to_string())),
+                (Some(Value::String(s)), _) => FieldValue::Text(s.clone()),
+                (Some(other), _) => FieldValue::Text(other.to_string()),
             })
             .collect();
         layer.features.push(Feature {
             fid: (idx + 1) as u64,
-            geometry: Some(geometry),
+            geometry,
             attributes,
         });
     }
@@ -212,7 +260,7 @@ pub fn inspect_local_raster(
     let ds = terrio::open_raster(p_str)?;
     let width = ds.raster.cols;
     let height = ds.raster.rows;
-    let nodata = ds.raster.nodata.is_finite().then_some(ds.raster.nodata);
+    let nodata = ds.nodata().filter(|nd| nd.is_finite());
     let pixel_size_x = ds.raster.cell_size_x.abs();
     let pixel_size_y = ds.raster.cell_size_y.abs();
     let crs = ds
@@ -222,8 +270,18 @@ pub fn inspect_local_raster(
         .map(|code| format!("EPSG:{code}"))
         .or_else(|| ds.raster.crs.wkt.clone());
 
-    let categorical = product_hint
-        .map(|p| is_categorical_band(p, band_hint.or(Some("B01_WTR"))))
+    let resolved_product = product_hint.and_then(|p| find_product(p).ok());
+    let effective_product = resolved_product
+        .as_ref()
+        .map(|p| p.short_name.as_str())
+        .or(product_hint);
+    let effective_band = band_hint.or_else(|| {
+        resolved_product
+            .as_ref()
+            .and_then(|p| p.default_bands.first().map(String::as_str))
+    });
+    let categorical = effective_product
+        .map(|p| is_categorical_band(p, effective_band))
         .unwrap_or(false);
 
     // Compute pixel area in km^2: if projected meters, use actual pixel size; else 30 m OPERA default.
@@ -261,8 +319,8 @@ pub fn inspect_local_raster(
         .into_iter()
         .map(|(cls, cnt)| ClassBreakdown {
             class_value: cls,
-            label: product_hint
-                .and_then(|p| class_label(p, band_hint, cls))
+            label: effective_product
+                .and_then(|p| class_label(p, effective_band, cls))
                 .map(ToString::to_string),
             pixel_count: cnt as f64,
             percent: if valid_pixels > 0 {
