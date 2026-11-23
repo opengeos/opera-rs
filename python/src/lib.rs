@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use opera_rs::OperaError;
 use opera_rs::analysis::{
     ChangeDetectionOptions, TimeSeriesOptions, analyze_time_series, detect_change,
 };
@@ -15,17 +16,19 @@ use opera_rs::products::{
 };
 use opera_rs::titiler::{
     TitilerQuery, build_tile_url_template, build_tilejson_url, fetch_bbox_statistics, fetch_point,
-    fetch_tilejson,
+    fetch_tilejson, resolve_titiler_endpoint,
 };
 use opera_rs::types::{BBox, TitilerBackend};
 use opera_rs::viz::{PreviewOptions, render_preview_png};
-use opera_rs::{DEFAULT_TITILER_ENDPOINT, OperaError};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 fn to_py_err(err: OperaError) -> PyErr {
-    PyRuntimeError::new_err(err.to_string())
+    match err {
+        OperaError::InvalidInput(msg) => PyValueError::new_err(msg),
+        other => PyRuntimeError::new_err(other.to_string()),
+    }
 }
 
 fn to_json_string<T: serde::Serialize>(val: &T) -> PyResult<String> {
@@ -66,8 +69,12 @@ fn expression_presets_json(product: &str, band: &str) -> PyResult<String> {
 
 #[pyfunction]
 #[pyo3(signature = (place, endpoint=None))]
-fn geocode_json(place: &str, endpoint: Option<&str>) -> PyResult<String> {
-    let res = geocode_place(place, endpoint).map_err(to_py_err)?;
+fn geocode_json(py: Python<'_>, place: &str, endpoint: Option<&str>) -> PyResult<String> {
+    let place = place.to_string();
+    let endpoint = endpoint.map(ToString::to_string);
+    let res = py
+        .detach(|| geocode_place(&place, endpoint.as_deref()))
+        .map_err(to_py_err)?;
     to_json_string(&res)
 }
 
@@ -75,6 +82,7 @@ fn geocode_json(place: &str, endpoint: Option<&str>) -> PyResult<String> {
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (product="OPERA_L3_DSWX-HLS_V1", bbox=None, start=None, end=None, limit=50, deduplicate_versions=true, newest_per_tile=false, cmr_endpoint=None))]
 fn search_json(
+    py: Python<'_>,
     product: &str,
     bbox: Option<[f64; 4]>,
     start: Option<String>,
@@ -94,7 +102,7 @@ fn search_json(
         newest_per_tile,
         cmr_endpoint,
     };
-    let res = search_granules(&params).map_err(to_py_err)?;
+    let res = py.detach(|| search_granules(&params)).map_err(to_py_err)?;
     to_json_string(&res)
 }
 
@@ -119,12 +127,14 @@ fn tile_urls_json(
         return Err(PyValueError::new_err("water_only requires product"));
     }
     let parsed_backend: TitilerBackend = backend.parse().map_err(to_py_err)?;
+    let ep = resolve_titiler_endpoint(endpoint).map_err(to_py_err)?;
     let chosen_bands = bands.unwrap_or_default();
     let style = product
         .map(|p| {
-            LayerStyle::for_band(
+            LayerStyle::for_request(
                 p,
                 chosen_bands.first().map(String::as_str),
+                expression.as_deref(),
                 water_only,
                 rescale,
                 colormap,
@@ -136,7 +146,7 @@ fn tile_urls_json(
             rescale: rescale.map(ToString::to_string),
         });
     let mut query = TitilerQuery::rasterio(concept_id);
-    query.endpoint = endpoint.unwrap_or(DEFAULT_TITILER_ENDPOINT).to_string();
+    query.endpoint = ep;
     query.backend = parsed_backend;
     query.product = product.map(ToString::to_string);
     query.granule_ur = granule_ur;
@@ -154,6 +164,7 @@ fn tile_urls_json(
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (product, lon, lat, concept_id=None, granule_ur=None, temporal=None, band=None, expression=None, endpoint=None))]
 fn point_json(
+    py: Python<'_>,
     product: &str,
     lon: f64,
     lat: f64,
@@ -165,20 +176,25 @@ fn point_json(
     endpoint: Option<String>,
 ) -> PyResult<String> {
     let prod = find_product(product).map_err(to_py_err)?;
-    let cid = match concept_id {
-        Some(c) => c,
-        None => resolve_concept_id(&prod.short_name, None).map_err(to_py_err)?,
-    };
-    let mut q = TitilerQuery::rasterio(&cid);
-    q.endpoint = endpoint.unwrap_or_else(|| DEFAULT_TITILER_ENDPOINT.to_string());
-    q.product = Some(prod.short_name.clone());
-    q.granule_ur = granule_ur;
-    q.temporal = temporal;
-    if let Some(b) = band.or_else(|| prod.default_bands.first().cloned()) {
-        q.assets = vec![b];
-    }
-    q.expression = expression;
-    let res = fetch_point(&q, lon, lat).map_err(to_py_err)?;
+    let ep = resolve_titiler_endpoint(endpoint.as_deref()).map_err(to_py_err)?;
+    let res = py
+        .detach(|| {
+            let cid = match concept_id {
+                Some(c) => c,
+                None => resolve_concept_id(&prod.short_name, None)?,
+            };
+            let mut q = TitilerQuery::rasterio(&cid);
+            q.endpoint = ep;
+            q.product = Some(prod.short_name.clone());
+            q.granule_ur = granule_ur;
+            q.temporal = temporal;
+            if let Some(b) = band.or_else(|| prod.default_bands.first().cloned()) {
+                q.assets = vec![b];
+            }
+            q.expression = expression;
+            fetch_point(&q, lon, lat)
+        })
+        .map_err(to_py_err)?;
     to_json_string(&res)
 }
 
@@ -186,6 +202,7 @@ fn point_json(
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (product, bbox, concept_id=None, granule_ur=None, start=None, end=None, band=None, expression=None, categorical=None, histogram_bins=None, endpoint=None))]
 fn stats_json(
+    py: Python<'_>,
     product: &str,
     bbox: [f64; 4],
     concept_id: Option<String>,
@@ -199,39 +216,52 @@ fn stats_json(
     endpoint: Option<String>,
 ) -> PyResult<String> {
     let parsed_bbox = BBox::from_array(bbox).map_err(to_py_err)?;
-    let (prod, cid, ur, chosen_band) = if let Some(g) = granule_ur {
-        let prod = find_product(product).map_err(to_py_err)?;
-        let c = match concept_id {
-            Some(c) => c,
-            None => resolve_concept_id(&prod.short_name, None).map_err(to_py_err)?,
-        };
-        let b = band
-            .or_else(|| prod.default_bands.first().cloned())
-            .ok_or_else(|| PyRuntimeError::new_err("specify band"))?;
-        (prod, c, Some(g), b)
-    } else {
-        let resolved =
-            resolve_aoi_layer(product, parsed_bbox, start, end, 1, band, concept_id, None)
-                .map_err(to_py_err)?;
-        let g_id = resolved.granules.first().map(|g| g.id.clone());
-        (resolved.product, resolved.concept_id, g_id, resolved.band)
-    };
+    let ep = resolve_titiler_endpoint(endpoint.as_deref()).map_err(to_py_err)?;
+    let product = product.to_string();
+    let res = py
+        .detach(|| {
+            let (prod, cid, ur, chosen_band) = if let Some(g) = granule_ur {
+                let prod = find_product(&product)?;
+                let c = match concept_id {
+                    Some(c) => c,
+                    None => resolve_concept_id(&prod.short_name, None)?,
+                };
+                let b = band
+                    .or_else(|| prod.default_bands.first().cloned())
+                    .ok_or_else(|| OperaError::InvalidInput("specify band".into()))?;
+                (prod, c, Some(g), b)
+            } else {
+                let resolved = resolve_aoi_layer(
+                    &product,
+                    parsed_bbox,
+                    start,
+                    end,
+                    1,
+                    band,
+                    concept_id,
+                    None,
+                )?;
+                let g_id = resolved.granules.first().map(|g| g.id.clone());
+                (resolved.product, resolved.concept_id, g_id, resolved.band)
+            };
 
-    let is_cat = categorical.unwrap_or_else(|| {
-        expression
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_none()
-            && is_categorical_band(&prod.short_name, Some(&chosen_band))
-    });
-    let mut q = TitilerQuery::rasterio(&cid);
-    q.endpoint = endpoint.unwrap_or_else(|| DEFAULT_TITILER_ENDPOINT.to_string());
-    q.product = Some(prod.short_name);
-    q.granule_ur = ur;
-    q.assets = vec![chosen_band];
-    q.expression = expression;
-    let res = fetch_bbox_statistics(&q, parsed_bbox, is_cat, histogram_bins).map_err(to_py_err)?;
+            let is_cat = categorical.unwrap_or_else(|| {
+                expression
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_none()
+                    && is_categorical_band(&prod.short_name, Some(&chosen_band))
+            });
+            let mut q = TitilerQuery::rasterio(&cid);
+            q.endpoint = ep;
+            q.product = Some(prod.short_name);
+            q.granule_ur = ur;
+            q.assets = vec![chosen_band];
+            q.expression = expression;
+            fetch_bbox_statistics(&q, parsed_bbox, is_cat, histogram_bins)
+        })
+        .map_err(to_py_err)?;
     to_json_string(&res)
 }
 
@@ -239,6 +269,7 @@ fn stats_json(
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (product, bbox, before_date, after_date, window_days=10, band=None, expression=None, endpoint=None))]
 fn detect_change_json(
+    py: Python<'_>,
     product: &str,
     bbox: [f64; 4],
     before_date: &str,
@@ -249,7 +280,8 @@ fn detect_change_json(
     endpoint: Option<String>,
 ) -> PyResult<String> {
     let parsed_bbox = BBox::from_array(bbox).map_err(to_py_err)?;
-    let res = detect_change(&ChangeDetectionOptions {
+    let ep = resolve_titiler_endpoint(endpoint.as_deref()).map_err(to_py_err)?;
+    let opts = ChangeDetectionOptions {
         product: product.to_string(),
         bbox: parsed_bbox,
         aoi_geojson: None,
@@ -258,10 +290,10 @@ fn detect_change_json(
         window_days,
         band,
         expression,
-        titiler_endpoint: endpoint,
+        titiler_endpoint: Some(ep),
         cmr_endpoint: None,
-    })
-    .map_err(to_py_err)?;
+    };
+    let res = py.detach(|| detect_change(&opts)).map_err(to_py_err)?;
     to_json_string(&res)
 }
 
@@ -269,6 +301,7 @@ fn detect_change_json(
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (product, bbox, start, end, interval_days=None, max_observations=12, band=None, expression=None, endpoint=None))]
 fn analyze_time_series_json(
+    py: Python<'_>,
     product: &str,
     bbox: [f64; 4],
     start: &str,
@@ -280,7 +313,8 @@ fn analyze_time_series_json(
     endpoint: Option<String>,
 ) -> PyResult<String> {
     let parsed_bbox = BBox::from_array(bbox).map_err(to_py_err)?;
-    let res = analyze_time_series(&TimeSeriesOptions {
+    let ep = resolve_titiler_endpoint(endpoint.as_deref()).map_err(to_py_err)?;
+    let opts = TimeSeriesOptions {
         product: product.to_string(),
         bbox: parsed_bbox,
         aoi_geojson: None,
@@ -290,10 +324,12 @@ fn analyze_time_series_json(
         max_observations,
         band,
         expression,
-        titiler_endpoint: endpoint,
+        titiler_endpoint: Some(ep),
         cmr_endpoint: None,
-    })
-    .map_err(to_py_err)?;
+    };
+    let res = py
+        .detach(|| analyze_time_series(&opts))
+        .map_err(to_py_err)?;
     to_json_string(&res)
 }
 
@@ -301,6 +337,7 @@ fn analyze_time_series_json(
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (bbox, start, end, products=None, max_granules=6, max_tiles_across=4, min_area_km2=0.02, endpoint=None))]
 fn derive_flood_extent_json(
+    py: Python<'_>,
     bbox: [f64; 4],
     start: &str,
     end: &str,
@@ -311,6 +348,7 @@ fn derive_flood_extent_json(
     endpoint: Option<String>,
 ) -> PyResult<String> {
     let parsed_bbox = BBox::from_array(bbox).map_err(to_py_err)?;
+    let ep = resolve_titiler_endpoint(endpoint.as_deref()).map_err(to_py_err)?;
     let mut opts = FloodExtentOptions::new(parsed_bbox, start, end);
     if let Some(p) = products.filter(|v| !v.is_empty()) {
         opts.products = p;
@@ -318,8 +356,10 @@ fn derive_flood_extent_json(
     opts.max_granules_per_product = max_granules;
     opts.max_tiles_across = max_tiles_across;
     opts.min_area_km2 = min_area_km2;
-    opts.titiler_endpoint = endpoint;
-    let res = derive_flood_extent(&opts).map_err(to_py_err)?;
+    opts.titiler_endpoint = Some(ep);
+    let res = py
+        .detach(|| derive_flood_extent(&opts))
+        .map_err(to_py_err)?;
     to_json_string(&res)
 }
 
@@ -341,49 +381,57 @@ fn preview_png<'py>(
     endpoint: Option<String>,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let parsed_bbox = BBox::from_array(bbox).map_err(to_py_err)?;
-    let resolved = resolve_aoi_layer(product, parsed_bbox, start, end, 3, band, None, None)
-        .map_err(to_py_err)?;
-    let prod = resolved.product;
-    let cid = resolved.concept_id;
-    let chosen_band = resolved.band;
-    let style = LayerStyle::for_band(&prod.short_name, Some(&chosen_band), water_only, None, None);
-    let ep = endpoint.unwrap_or_else(|| DEFAULT_TITILER_ENDPOINT.to_string());
-    let queries: Vec<TitilerQuery> = resolved
-        .granules
-        .iter()
-        .map(|g| {
-            TitilerQuery::for_granule_band(
-                &ep,
-                &cid,
-                &prod.short_name,
-                &g.id,
-                &chosen_band,
-                None,
-                Some(&style),
-            )
+    let ep = resolve_titiler_endpoint(endpoint.as_deref()).map_err(to_py_err)?;
+    let product = product.to_string();
+    let bytes = py
+        .detach(|| -> opera_rs::Result<Vec<u8>> {
+            let resolved =
+                resolve_aoi_layer(&product, parsed_bbox, start, end, 3, band, None, None)?;
+            let prod = resolved.product;
+            let cid = resolved.concept_id;
+            let chosen_band = resolved.band;
+            let style =
+                LayerStyle::for_band(&prod.short_name, Some(&chosen_band), water_only, None, None);
+            let queries: Vec<TitilerQuery> = resolved
+                .granules
+                .iter()
+                .map(|g| {
+                    TitilerQuery::for_granule_band(
+                        &ep,
+                        &cid,
+                        &prod.short_name,
+                        &g.id,
+                        &chosen_band,
+                        None,
+                        Some(&style),
+                    )
+                })
+                .collect();
+            let mut opts = PreviewOptions::new(parsed_bbox, &prod.short_name, Some(chosen_band));
+            opts.water_only = water_only;
+            opts.max_dim = max_dim;
+            opts.basemap = basemap;
+            opts.title = title;
+            let bytes = render_preview_png(&queries, &opts)?;
+            if let Some(p) = output_path {
+                let path = PathBuf::from(p);
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, &bytes)?;
+            }
+            Ok(bytes)
         })
-        .collect();
-    let mut opts = PreviewOptions::new(parsed_bbox, &prod.short_name, Some(chosen_band));
-    opts.water_only = water_only;
-    opts.max_dim = max_dim;
-    opts.basemap = basemap;
-    opts.title = title;
-    let bytes = render_preview_png(&queries, &opts).map_err(to_py_err)?;
-    if let Some(p) = output_path {
-        let path = PathBuf::from(p);
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        }
-        std::fs::write(&path, &bytes).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-    }
+        .map_err(to_py_err)?;
     Ok(PyBytes::new(py, &bytes))
 }
 
 #[pyfunction]
 #[pyo3(signature = (product, concept_id=None, granule_ur=None, band=None, water_only=false, endpoint=None))]
 fn fetch_tilejson_json(
+    py: Python<'_>,
     product: &str,
     concept_id: Option<String>,
     granule_ur: Option<String>,
@@ -392,51 +440,72 @@ fn fetch_tilejson_json(
     endpoint: Option<String>,
 ) -> PyResult<String> {
     let prod = find_product(product).map_err(to_py_err)?;
-    let cid = match concept_id {
-        Some(c) => c,
-        None => resolve_concept_id(&prod.short_name, None).map_err(to_py_err)?,
-    };
-    let chosen_band = band.or_else(|| prod.default_bands.first().cloned());
-    let style = LayerStyle::for_band(
-        &prod.short_name,
-        chosen_band.as_deref(),
-        water_only,
-        None,
-        None,
-    );
-    let mut q = TitilerQuery::rasterio(&cid);
-    q.endpoint = endpoint.unwrap_or_else(|| DEFAULT_TITILER_ENDPOINT.to_string());
-    q.product = Some(prod.short_name);
-    q.granule_ur = granule_ur;
-    if let Some(b) = chosen_band {
-        q.assets = vec![b];
-    }
-    q.apply_style(&style);
-    let tj = fetch_tilejson(&q).map_err(to_py_err)?;
+    let ep = resolve_titiler_endpoint(endpoint.as_deref()).map_err(to_py_err)?;
+    let tj = py
+        .detach(|| {
+            let cid = match concept_id {
+                Some(c) => c,
+                None => resolve_concept_id(&prod.short_name, None)?,
+            };
+            let chosen_band = band.or_else(|| prod.default_bands.first().cloned());
+            let style = LayerStyle::for_band(
+                &prod.short_name,
+                chosen_band.as_deref(),
+                water_only,
+                None,
+                None,
+            );
+            let mut q = TitilerQuery::rasterio(&cid);
+            q.endpoint = ep;
+            q.product = Some(prod.short_name);
+            q.granule_ur = granule_ur;
+            if let Some(b) = chosen_band {
+                q.assets = vec![b];
+            }
+            q.apply_style(&style);
+            fetch_tilejson(&q)
+        })
+        .map_err(to_py_err)?;
     to_json_string(&tj)
 }
 
 #[pyfunction]
-fn read_aoi_bbox_py(path: &str) -> PyResult<[f64; 4]> {
-    read_aoi_bbox(path).map(|b| b.to_array()).map_err(to_py_err)
+fn read_aoi_bbox_py(py: Python<'_>, path: &str) -> PyResult<[f64; 4]> {
+    let path = path.to_string();
+    py.detach(|| read_aoi_bbox(&path).map(|b| b.to_array()))
+        .map_err(to_py_err)
 }
 
 #[pyfunction]
 #[pyo3(signature = (feature_collection_json, out_path, layer_name="opera"))]
 fn write_vector_py(
+    py: Python<'_>,
     feature_collection_json: &str,
     out_path: &str,
     layer_name: &str,
 ) -> PyResult<usize> {
     let fc: serde_json::Value = serde_json::from_str(feature_collection_json)
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-    write_feature_collection(&fc, out_path, layer_name).map_err(to_py_err)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let out_path = out_path.to_string();
+    let layer_name = layer_name.to_string();
+    py.detach(|| write_feature_collection(&fc, &out_path, &layer_name))
+        .map_err(to_py_err)
 }
 
 #[pyfunction]
 #[pyo3(signature = (path, product=None, band=None))]
-fn inspect_raster_json(path: &str, product: Option<&str>, band: Option<&str>) -> PyResult<String> {
-    let res = inspect_local_raster(path, product, band).map_err(to_py_err)?;
+fn inspect_raster_json(
+    py: Python<'_>,
+    path: &str,
+    product: Option<&str>,
+    band: Option<&str>,
+) -> PyResult<String> {
+    let path = path.to_string();
+    let product = product.map(ToString::to_string);
+    let band = band.map(ToString::to_string);
+    let res = py
+        .detach(|| inspect_local_raster(&path, product.as_deref(), band.as_deref()))
+        .map_err(to_py_err)?;
     to_json_string(&res)
 }
 

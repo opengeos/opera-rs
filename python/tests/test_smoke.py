@@ -70,7 +70,7 @@ def test_offline_tile_urls_and_vector_io(tmp_path: Path) -> None:
     assert abs(bbox[3] - 36.3) < 1e-6
 
 
-def test_validation_errors() -> None:
+def test_validation_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError, match="water_only requires product"):
         opera_rs.tile_urls("C2617126679-POCLOUD", water_only=True)
 
@@ -79,6 +79,22 @@ def test_validation_errors() -> None:
 
     with pytest.raises(ValueError, match="bbox is required"):
         opera_rs.stats(None)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="http:// or https://"):
+        opera_rs.tile_urls("C2617126679-POCLOUD", endpoint="file:///etc/passwd")
+
+    with pytest.raises(ValueError):
+        opera_rs.tile_urls("C2617126679-POCLOUD", backend="invalid-backend")
+
+    monkeypatch.setenv("OPERA_TITILER_ENDPOINT", "https://custom-titiler.example.org")
+    custom_urls = opera_rs.tile_urls(
+        "C2617126679-POCLOUD",
+        product="rtc-s1",
+        bands=["VV"],
+        expression="10*log10(b1)",
+    )
+    assert custom_urls["tilejson_url"].startswith("https://custom-titiler.example.org/")
+    assert "rescale=" not in custom_urls["tilejson_url"]
 
 
 def test_bundled_cli_and_mcp_server_via_python_module(tmp_path: Path) -> None:
