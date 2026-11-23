@@ -7,11 +7,13 @@ use serde_json::Value;
 use crate::DEFAULT_TITILER_ENDPOINT;
 use crate::cmr::OperaGranule;
 #[cfg(feature = "http")]
-use crate::cmr::{CmrSearchParams, search_granules};
+use crate::cmr::{CmrSearchParams, search_granules, search_granules_sorted};
 use crate::error::{OperaError, Result};
 use crate::products::{DSWX_OPEN_WATER_CLASS, DSWX_PARTIAL_WATER_CLASS};
 #[cfg(feature = "http")]
-use crate::products::{find_product, is_categorical_band, is_dswx_water_band};
+use crate::products::{
+    find_product, is_categorical_band, is_dswx_binary_water_band, is_dswx_water_band,
+};
 use crate::titiler::BandStatistics;
 #[cfg(feature = "http")]
 use crate::titiler::{StatisticsResult, TitilerQuery, fetch_statistics};
@@ -203,8 +205,42 @@ pub fn extract_dswx_water_areas(stats: &BandStatistics) -> (Option<f64>, Option<
     (Some(open), Some(open + partial))
 }
 
+/// Extracts `(open_water_km2, total_water_km2)` from categorical DSWx class statistics.
+///
+/// For binary water bands (`B02_BWTR`, where class 1 combines open and partial water),
+/// pass `binary_water = true` so `open_water_km2` is left as `None` and `total_water_km2`
+/// reports the combined class 1 area.
+pub fn extract_dswx_water_areas_for_band(
+    stats: &BandStatistics,
+    binary_water: bool,
+) -> (Option<f64>, Option<f64>) {
+    if stats.class_breakdown.is_empty() {
+        return (None, None);
+    }
+    let class1 = stats
+        .class_breakdown
+        .iter()
+        .find(|c| c.class_value == i64::from(DSWX_OPEN_WATER_CLASS))
+        .map_or(0.0, |c| c.area_km2);
+    if binary_water {
+        return (None, Some(class1));
+    }
+    let partial = stats
+        .class_breakdown
+        .iter()
+        .find(|c| c.class_value == i64::from(DSWX_PARTIAL_WATER_CLASS))
+        .map_or(0.0, |c| c.area_km2);
+    (Some(class1), Some(class1 + partial))
+}
+
 /// Computes class-by-class deltas between two categorical [`BandStatistics`] snapshots.
+///
+/// Returns an empty vector if either snapshot lacks a categorical class breakdown, avoiding
+/// fabricated zero-to-nonzero area changes when a histogram is missing.
 pub fn compute_class_deltas(before: &BandStatistics, after: &BandStatistics) -> Vec<ClassDelta> {
+    if before.class_breakdown.is_empty() || after.class_breakdown.is_empty() {
+        return Vec::new();
+    }
     let mut keys: Vec<i64> = before
         .class_breakdown
         .iter()
@@ -237,16 +273,21 @@ pub fn compute_class_deltas(before: &BandStatistics, after: &BandStatistics) -> 
         .collect()
 }
 
-/// Picks the granule whose acquisition date is closest to `target`.
+/// Picks the dated granule whose acquisition date is closest to `target`.
+///
+/// Undated granules (whose `date` cannot be parsed as `YYYY-MM-DD`) are excluded.
 pub fn pick_nearest_granule(
     granules: &[OperaGranule],
     target: CalendarDate,
 ) -> Option<&OperaGranule> {
-    granules.iter().min_by_key(|g| {
-        CalendarDate::parse(&g.date)
-            .map(|d| d.days_between(target).abs())
-            .unwrap_or(i64::MAX)
-    })
+    granules
+        .iter()
+        .filter_map(|g| {
+            let d = CalendarDate::parse(&g.date).ok()?;
+            Some((d.days_between(target).abs(), g))
+        })
+        .min_by_key(|&(dist, _)| dist)
+        .map(|(_, g)| g)
 }
 
 #[cfg(feature = "http")]
@@ -261,6 +302,12 @@ fn first_band_stats(res: StatisticsResult) -> Result<BandStatistics> {
 #[cfg(feature = "http")]
 pub fn detect_change(opts: &ChangeDetectionOptions) -> Result<ChangeDetectionResult> {
     let prod = find_product(&opts.product)?;
+    if !prod.raster_tiles_supported {
+        return Err(OperaError::InvalidInput(format!(
+            "product '{}' uses the '{}' backend (HDF5/NetCDF); detect_change currently supports rasterio COG products (DSWx, DIST, RTC-S1)",
+            prod.short_name, prod.backend
+        )));
+    }
     let before_target = CalendarDate::parse(&opts.before_date)?;
     let after_target = CalendarDate::parse(&opts.after_date)?;
     let window = opts.window_days.clamp(0, 90);
@@ -269,20 +316,41 @@ pub fn detect_change(opts: &ChangeDetectionOptions) -> Result<ChangeDetectionRes
         .clone()
         .unwrap_or_else(|| opts.bbox.to_geojson_feature());
 
+    // Search both halves around `target` (descending before/on target, ascending on/after target)
+    // so an exact-date scene is never pushed off page 1 by later acquisitions.
     let find_near = |target: CalendarDate| -> Result<OperaGranule> {
-        let s = target.add_days(-window).to_string();
-        let e = target.add_days(window).to_string();
-        let res = search_granules(&CmrSearchParams {
-            product: prod.short_name.clone(),
-            bbox: Some(opts.bbox),
-            start: Some(s.clone()),
-            end: Some(e.clone()),
-            limit: 50,
-            deduplicate_versions: true,
-            newest_per_tile: false,
-            cmr_endpoint: opts.cmr_endpoint.clone(),
-        })?;
-        pick_nearest_granule(&res.granules, target)
+        let mut candidates = Vec::new();
+        let left = search_granules_sorted(
+            &CmrSearchParams {
+                product: prod.short_name.clone(),
+                bbox: Some(opts.bbox),
+                start: Some(target.add_days(-window).to_string()),
+                end: Some(target.to_string()),
+                limit: 50,
+                deduplicate_versions: true,
+                newest_per_tile: false,
+                cmr_endpoint: opts.cmr_endpoint.clone(),
+            },
+            false,
+        )?;
+        candidates.extend(left.granules);
+        if window > 0 {
+            let right = search_granules_sorted(
+                &CmrSearchParams {
+                    product: prod.short_name.clone(),
+                    bbox: Some(opts.bbox),
+                    start: Some(target.to_string()),
+                    end: Some(target.add_days(window).to_string()),
+                    limit: 50,
+                    deduplicate_versions: true,
+                    newest_per_tile: false,
+                    cmr_endpoint: opts.cmr_endpoint.clone(),
+                },
+                true,
+            )?;
+            candidates.extend(right.granules);
+        }
+        pick_nearest_granule(&candidates, target)
             .cloned()
             .ok_or_else(|| {
                 OperaError::NoResults(format!(
@@ -310,9 +378,16 @@ pub fn detect_change(opts: &ChangeDetectionOptions) -> Result<ChangeDetectionRes
             ))
         })?;
 
-    let categorical =
-        opts.expression.is_none() && is_categorical_band(&prod.short_name, Some(&band));
-    let is_water = opts.expression.is_none() && is_dswx_water_band(&prod.short_name, Some(&band));
+    let expression = opts
+        .expression
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    let categorical = expression.is_none() && is_categorical_band(&prod.short_name, Some(&band));
+    let is_water = expression.is_none() && is_dswx_water_band(&prod.short_name, Some(&band));
+    let is_binary_water =
+        expression.is_none() && is_dswx_binary_water_band(&prod.short_name, Some(&band));
     let endpoint = opts
         .titiler_endpoint
         .as_deref()
@@ -324,10 +399,10 @@ pub fn detect_change(opts: &ChangeDetectionOptions) -> Result<ChangeDetectionRes
         q.product = Some(prod.short_name.clone());
         q.granule_ur = Some(g.id.clone());
         q.assets = vec![band.clone()];
-        q.expression = opts.expression.clone();
+        q.expression = expression.clone();
         let stats = first_band_stats(fetch_statistics(&q, &aoi, categorical, None)?)?;
         let (open_w, total_w) = if is_water {
-            extract_dswx_water_areas(&stats)
+            extract_dswx_water_areas_for_band(&stats, is_binary_water)
         } else {
             (None, None)
         };
@@ -421,6 +496,14 @@ pub struct SeriesTrend {
     pub slope_per_day: Option<f64>,
 }
 
+/// Record of a sampled granule whose statistics request failed during time-series analysis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedObservation {
+    pub date: String,
+    pub granule_id: String,
+    pub error: String,
+}
+
 /// Result of [`analyze_time_series`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeSeriesResult {
@@ -431,11 +514,22 @@ pub struct TimeSeriesResult {
     pub start: String,
     pub end: String,
     pub observations: Vec<ObservationSummary>,
+    /// Sampled granules whose `titiler-cmr` statistics requests failed (disclosed for transparency).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_observations: Vec<FailedObservation>,
     pub trend: Option<SeriesTrend>,
 }
 
+fn csv_escape(field: &str) -> String {
+    if field.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
+}
+
 impl TimeSeriesResult {
-    /// Exports observations as CSV (`date,granule_id,tile,mean,valid_percent,open_water_km2,total_water_km2`).
+    /// Exports observations as RFC 4180 CSV (`date,granule_id,tile,mean,valid_percent,open_water_km2,total_water_km2`).
     pub fn to_csv(&self) -> String {
         let mut out = String::from(
             "date,granule_id,tile,mean,valid_percent,open_water_km2,total_water_km2\n",
@@ -444,9 +538,9 @@ impl TimeSeriesResult {
             let opt = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
             out.push_str(&format!(
                 "{},{},{},{},{},{},{}\n",
-                obs.acquired_date,
-                obs.granule_id,
-                obs.tile,
+                csv_escape(&obs.acquired_date),
+                csv_escape(&obs.granule_id),
+                csv_escape(&obs.tile),
                 opt(obs.stats.mean),
                 opt(obs.stats.valid_percent),
                 opt(obs.open_water_km2),
@@ -457,36 +551,41 @@ impl TimeSeriesResult {
     }
 }
 
-/// Samples granules chronologically with optional minimum `interval_days` spacing and count cap.
+/// Samples dated granules chronologically with optional minimum `interval_days` spacing and count cap.
+///
+/// Granules without a valid `YYYY-MM-DD` acquisition date are excluded regardless of spacing.
 pub fn sample_granules_chronologically(
-    mut granules: Vec<OperaGranule>,
+    granules: Vec<OperaGranule>,
     interval_days: Option<i64>,
     max_observations: usize,
 ) -> Vec<OperaGranule> {
-    granules.sort_by(|a, b| a.date.cmp(&b.date).then_with(|| a.id.cmp(&b.id)));
+    let mut dated: Vec<(CalendarDate, OperaGranule)> = granules
+        .into_iter()
+        .filter_map(|g| CalendarDate::parse(&g.date).ok().map(|d| (d, g)))
+        .collect();
+    dated.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
+
     // Keep one representative granule per acquisition date first.
-    let mut by_date: Vec<OperaGranule> = Vec::new();
-    for g in granules {
-        if by_date.last().is_some_and(|prev| prev.date == g.date) {
+    let mut by_date: Vec<(CalendarDate, OperaGranule)> = Vec::new();
+    for (d, g) in dated {
+        if by_date.last().is_some_and(|(prev_d, _)| *prev_d == d) {
             continue;
         }
-        by_date.push(g);
+        by_date.push((d, g));
     }
 
-    let spaced = if let Some(min_gap) = interval_days.filter(|&d| d > 0) {
+    let spaced: Vec<OperaGranule> = if let Some(min_gap) = interval_days.filter(|&d| d > 0) {
         let mut kept: Vec<OperaGranule> = Vec::new();
         let mut last_day: Option<CalendarDate> = None;
-        for g in by_date {
-            if let Ok(d) = CalendarDate::parse(&g.date)
-                && last_day.is_none_or(|prev| d.days_between(prev) >= min_gap)
-            {
+        for (d, g) in by_date {
+            if last_day.is_none_or(|prev| d.days_between(prev) >= min_gap) {
                 last_day = Some(d);
                 kept.push(g);
             }
         }
         kept
     } else {
-        by_date
+        by_date.into_iter().map(|(_, g)| g).collect()
     };
 
     let cap = max_observations.clamp(1, 100);
@@ -544,88 +643,164 @@ pub fn compute_series_trend(metric: &str, points: &[(f64, f64)]) -> Option<Serie
 #[cfg(feature = "http")]
 pub fn analyze_time_series(opts: &TimeSeriesOptions) -> Result<TimeSeriesResult> {
     let prod = find_product(&opts.product)?;
-    let _ = CalendarDate::parse(&opts.start)?;
-    let _ = CalendarDate::parse(&opts.end)?;
+    if !prod.raster_tiles_supported {
+        return Err(OperaError::InvalidInput(format!(
+            "product '{}' uses the '{}' backend (HDF5/NetCDF); analyze_time_series currently supports rasterio COG products (DSWx, DIST, RTC-S1)",
+            prod.short_name, prod.backend
+        )));
+    }
+    let start_date = CalendarDate::parse(&opts.start)?;
+    let end_date = CalendarDate::parse(&opts.end)?;
+    if start_date > end_date {
+        return Err(OperaError::InvalidInput(format!(
+            "start date {start_date} must be on or before end date {end_date}"
+        )));
+    }
     let aoi = opts
         .aoi_geojson
         .clone()
         .unwrap_or_else(|| opts.bbox.to_geojson_feature());
 
+    let mut candidate_granules = Vec::new();
     let search = search_granules(&CmrSearchParams {
         product: prod.short_name.clone(),
         bbox: Some(opts.bbox),
         start: Some(opts.start.clone()),
         end: Some(opts.end.clone()),
-        limit: 200,
+        limit: 500,
         deduplicate_versions: true,
         newest_per_tile: false,
         cmr_endpoint: opts.cmr_endpoint.clone(),
     })?;
-    if search.granules.is_empty() {
+    let mut concept_id = search.concept_id.clone();
+    // If CMR has more than 500 hits in the range, also sample across evenly spaced sub-windows
+    // so early dates in long intervals are not truncated.
+    if search.hits > 500 && opts.max_observations > 1 {
+        let total_days = end_date.days_between(start_date).max(1);
+        let buckets = opts.max_observations.clamp(2, 24) as i64;
+        let step = (total_days / buckets).max(1);
+        for i in 0..buckets {
+            let b_start = start_date.add_days(i * step);
+            let b_end = if i == buckets - 1 {
+                end_date
+            } else {
+                start_date.add_days(((i + 1) * step - 1).min(total_days))
+            };
+            if let Ok(sub) = search_granules_sorted(
+                &CmrSearchParams {
+                    product: prod.short_name.clone(),
+                    bbox: Some(opts.bbox),
+                    start: Some(b_start.to_string()),
+                    end: Some(b_end.to_string()),
+                    limit: 5,
+                    deduplicate_versions: true,
+                    newest_per_tile: false,
+                    cmr_endpoint: opts.cmr_endpoint.clone(),
+                },
+                true,
+            ) {
+                if concept_id.is_none() {
+                    concept_id = sub.concept_id;
+                }
+                candidate_granules.extend(sub.granules);
+            }
+        }
+    } else {
+        candidate_granules = search.granules;
+    }
+
+    if candidate_granules.is_empty() {
         return Err(OperaError::NoResults(format!(
             "no {} granules found between {} and {}",
             prod.short_name, opts.start, opts.end
         )));
     }
 
-    let concept_id = search
-        .concept_id
-        .clone()
+    let concept_id = concept_id
+        .or_else(|| candidate_granules.iter().find_map(|g| g.concept_id.clone()))
         .ok_or_else(|| OperaError::NoResults("granules missing collection concept_id".into()))?;
-    let sampled =
-        sample_granules_chronologically(search.granules, opts.interval_days, opts.max_observations);
+    let sampled = sample_granules_chronologically(
+        candidate_granules,
+        opts.interval_days,
+        opts.max_observations,
+    );
+    let Some(first_sampled) = sampled.first() else {
+        return Err(OperaError::NoResults(format!(
+            "no dated {} granules remained after sampling between {} and {}",
+            prod.short_name, opts.start, opts.end
+        )));
+    };
     let band = opts
         .band
         .clone()
-        .or_else(|| prod.choose_band(&sampled[0].bands))
+        .or_else(|| prod.choose_band(&first_sampled.bands))
         .ok_or_else(|| {
             OperaError::InvalidInput(format!(
                 "no default band available for product '{}'",
                 prod.short_name
             ))
         })?;
-    let categorical =
-        opts.expression.is_none() && is_categorical_band(&prod.short_name, Some(&band));
-    let is_water = opts.expression.is_none() && is_dswx_water_band(&prod.short_name, Some(&band));
+    let expression = opts
+        .expression
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    let categorical = expression.is_none() && is_categorical_band(&prod.short_name, Some(&band));
+    let is_water = expression.is_none() && is_dswx_water_band(&prod.short_name, Some(&band));
+    let is_binary_water =
+        expression.is_none() && is_dswx_binary_water_band(&prod.short_name, Some(&band));
     let endpoint = opts
         .titiler_endpoint
         .as_deref()
         .unwrap_or(DEFAULT_TITILER_ENDPOINT);
 
     let mut observations = Vec::with_capacity(sampled.len());
+    let mut failed_observations = Vec::new();
     for g in &sampled {
         let mut q = TitilerQuery::rasterio(&concept_id);
         q.endpoint = endpoint.to_string();
         q.product = Some(prod.short_name.clone());
         q.granule_ur = Some(g.id.clone());
         q.assets = vec![band.clone()];
-        q.expression = opts.expression.clone();
-        if let Ok(stat_res) = fetch_statistics(&q, &aoi, categorical, None)
-            && let Ok(stats) = first_band_stats(stat_res)
-        {
-            let (open_w, total_w) = if is_water {
-                extract_dswx_water_areas(&stats)
-            } else {
-                (None, None)
-            };
-            observations.push(ObservationSummary {
-                target_date: g.date.clone(),
-                granule_id: g.id.clone(),
-                acquired_date: g.date.clone(),
-                begin_date: g.begin_date.clone(),
-                tile: g.tile.clone(),
-                band: band.clone(),
-                stats,
-                open_water_km2: open_w,
-                total_water_km2: total_w,
-            });
+        q.expression = expression.clone();
+        match fetch_statistics(&q, &aoi, categorical, None).and_then(first_band_stats) {
+            Ok(stats) => {
+                let (open_w, total_w) = if is_water {
+                    extract_dswx_water_areas_for_band(&stats, is_binary_water)
+                } else {
+                    (None, None)
+                };
+                observations.push(ObservationSummary {
+                    target_date: g.date.clone(),
+                    granule_id: g.id.clone(),
+                    acquired_date: g.date.clone(),
+                    begin_date: g.begin_date.clone(),
+                    tile: g.tile.clone(),
+                    band: band.clone(),
+                    stats,
+                    open_water_km2: open_w,
+                    total_water_km2: total_w,
+                });
+            }
+            Err(err) => {
+                failed_observations.push(FailedObservation {
+                    date: g.date.clone(),
+                    granule_id: g.id.clone(),
+                    error: err.to_string(),
+                });
+            }
         }
     }
 
     if observations.is_empty() {
-        return Err(OperaError::NoResults(
-            "failed to compute statistics for any sampled granule".into(),
-        ));
+        let detail = failed_observations
+            .first()
+            .map(|f| format!(" (first error on {}: {})", f.granule_id, f.error))
+            .unwrap_or_default();
+        return Err(OperaError::NoResults(format!(
+            "failed to compute statistics for any sampled granule{detail}"
+        )));
     }
 
     let origin = CalendarDate::parse(&observations[0].acquired_date).ok();
@@ -660,6 +835,7 @@ pub fn analyze_time_series(opts: &TimeSeriesOptions) -> Result<TimeSeriesResult>
         start: opts.start.clone(),
         end: opts.end.clone(),
         observations,
+        failed_observations,
         trend,
     })
 }
@@ -737,10 +913,12 @@ mod tests {
             tile: "T1".into(),
             bbox: None,
             rings: vec![],
+            holes: vec![],
             bands: vec!["B01_WTR".into()],
             data_links: vec![],
         };
         let gs = vec![
+            mk(""),
             mk("2024-01-01"),
             mk("2024-01-03"),
             mk("2024-01-10"),
@@ -753,5 +931,9 @@ mod tests {
             dates,
             vec!["2024-01-01", "2024-01-10", "2024-01-20", "2024-01-30"]
         );
+        assert!(
+            pick_nearest_granule(&[mk("")], CalendarDate::parse("2024-01-01").unwrap()).is_none()
+        );
+        assert_eq!(csv_escape("tile,rev\"1"), "\"tile,rev\"\"1\"");
     }
 }

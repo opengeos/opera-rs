@@ -39,9 +39,13 @@ pub struct RgbaImage {
     pub data: Vec<u8>,
 }
 
+/// Maximum supported Web Mercator zoom level (guards against bit-shift overflow).
+pub const MAX_MERCATOR_ZOOM: u8 = 24;
+
 /// Converts WGS 84 `(lon, lat)` to global Web Mercator pixel coordinates at `zoom`.
 pub fn lon_lat_to_pixel(lon: f64, lat: f64, zoom: u8) -> (f64, f64) {
-    let scale = (TILE_SIZE as f64) * (1u64 << zoom) as f64;
+    let z = zoom.min(MAX_MERCATOR_ZOOM);
+    let scale = (TILE_SIZE as f64) * (1u64 << z) as f64;
     let x = ((lon + 180.0) / 360.0) * scale;
     let sin_lat = lat.to_radians().sin().clamp(-0.999_999_9, 0.999_999_9);
     let y = (0.5 - ((1.0 + sin_lat) / (1.0 - sin_lat)).ln() / (4.0 * std::f64::consts::PI)) * scale;
@@ -50,23 +54,24 @@ pub fn lon_lat_to_pixel(lon: f64, lat: f64, zoom: u8) -> (f64, f64) {
 
 /// Inverse of [`lon_lat_to_pixel`]: global Web Mercator pixel to WGS 84 `[lon, lat]`.
 pub fn pixel_to_lon_lat(px: f64, py: f64, zoom: u8) -> [f64; 2] {
-    let scale = (TILE_SIZE as f64) * (1u64 << zoom) as f64;
+    let z = zoom.min(MAX_MERCATOR_ZOOM);
+    let scale = (TILE_SIZE as f64) * (1u64 << z) as f64;
     let lon = (px / scale) * 360.0 - 180.0;
     let n = std::f64::consts::PI - 2.0 * std::f64::consts::PI * (py / scale);
     let lat = (0.5 * (n.exp() - (-n).exp())).atan().to_degrees();
     [lon, lat]
 }
 
-/// Picks the highest zoom level whose coverage of `bbox` fits within `max_tiles_across` tiles
-/// along its longer side.
+/// Picks the highest zoom level whose actual tile grid (columns and rows) stays within
+/// `max_tiles_across` tiles along both axes.
 pub fn choose_zoom(bbox: BBox, max_tiles_across: usize) -> Result<u8> {
     let safe = bbox.clamp_mercator()?;
-    let budget = max_tiles_across.clamp(1, MAX_TILES_ACROSS_CAP) as f64;
+    let budget = max_tiles_across.clamp(1, MAX_TILES_ACROSS_CAP) as u32;
     for z in (0..=16u8).rev() {
-        let (x0, y0) = lon_lat_to_pixel(safe.west, safe.north, z);
-        let (x1, y1) = lon_lat_to_pixel(safe.east, safe.south, z);
-        let across = (x1 - x0).abs().max((y1 - y0).abs()) / (TILE_SIZE as f64);
-        if across.is_finite() && across <= budget {
+        let grid = tile_grid_for_bbox(safe, z)?;
+        let cols = grid.tx1.saturating_sub(grid.tx0) + 1;
+        let rows = grid.ty1.saturating_sub(grid.ty0) + 1;
+        if cols <= budget && rows <= budget {
             return Ok(z);
         }
     }
@@ -325,13 +330,76 @@ pub struct MaskVectorizeOptions {
     pub origin_py: f64,
     pub scale: usize,
     pub min_area_km2: f64,
+    /// Optional original (un-downsampled) raster width in pixels to clip partial boundary blocks.
+    pub source_width: Option<usize>,
+    /// Optional original (un-downsampled) raster height in pixels to clip partial boundary blocks.
+    pub source_height: Option<usize>,
 }
 
 struct RingHierarchyItem {
     ring: Vec<[f64; 2]>,
+    bbox: [f64; 4],
     abs_area: f64,
     parent: Option<usize>,
     depth: usize,
+}
+
+fn ring_bbox(ring: &[[f64; 2]]) -> [f64; 4] {
+    let mut b = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for &[x, y] in ring {
+        b[0] = b[0].min(x);
+        b[1] = b[1].min(y);
+        b[2] = b[2].max(x);
+        b[3] = b[3].max(y);
+    }
+    b
+}
+
+fn bbox_contains(outer: [f64; 4], inner: [f64; 4]) -> bool {
+    outer[0] <= inner[0] + 1e-12
+        && outer[1] <= inner[1] + 1e-12
+        && outer[2] >= inner[2] - 1e-12
+        && outer[3] >= inner[3] - 1e-12
+}
+
+/// True when `p` lies strictly on a segment `[a, b]` (within floating tolerance).
+fn point_on_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> bool {
+    let eps = 1e-11;
+    let cross = (p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0]);
+    if cross.abs() > eps {
+        return false;
+    }
+    p[0] >= a[0].min(b[0]) - eps
+        && p[0] <= a[0].max(b[0]) + eps
+        && p[1] >= a[1].min(b[1]) - eps
+        && p[1] <= a[1].max(b[1]) + eps
+}
+
+fn point_on_ring_boundary(p: [f64; 2], ring: &[[f64; 2]]) -> bool {
+    ring.windows(2).any(|w| point_on_segment(p, w[0], w[1]))
+}
+
+/// True when `inner` lies strictly inside `outer` (corner-touching polygons do not count as nested).
+fn ring_strictly_inside(inner: &[[f64; 2]], outer: &[[f64; 2]]) -> bool {
+    // Check vertices of `inner` that do not lie on `outer`'s boundary.
+    for &p in inner.iter().take(inner.len().saturating_sub(1)) {
+        if !point_on_ring_boundary(p, outer) {
+            return point_in_ring(p, outer);
+        }
+    }
+    // Check edge midpoints of `inner` not lying on `outer`'s boundary.
+    for w in inner.windows(2) {
+        let mid = [0.5 * (w[0][0] + w[1][0]), 0.5 * (w[0][1] + w[1][1])];
+        if !point_on_ring_boundary(mid, outer) {
+            return point_in_ring(mid, outer);
+        }
+    }
+    false
 }
 
 /// Converts a binary water mask into a GeoJSON `FeatureCollection` of RFC 7946 polygons with
@@ -343,6 +411,8 @@ pub fn mask_to_feature_collection(
     opts: MaskVectorizeOptions,
 ) -> (Value, f64) {
     let scale = opts.scale.max(1) as f64;
+    let max_px_x = opts.source_width.map(|w| w as f64);
+    let max_px_y = opts.source_height.map(|h| h as f64);
     let raw_rings = trace_mask_rings(mask, width, height);
     let mut items: Vec<RingHierarchyItem> = raw_rings
         .into_iter()
@@ -350,19 +420,23 @@ pub fn mask_to_feature_collection(
             let projected: Vec<[f64; 2]> = r
                 .into_iter()
                 .map(|[nx, ny]| {
-                    pixel_to_lon_lat(
-                        opts.origin_px + (nx as f64) * scale,
-                        opts.origin_py + (ny as f64) * scale,
-                        opts.zoom,
-                    )
+                    let rx = (nx as f64) * scale;
+                    let ry = (ny as f64) * scale;
+                    let rx = max_px_x.map_or(rx, |lim| rx.min(lim));
+                    let ry = max_px_y.map_or(ry, |lim| ry.min(lim));
+                    let [lon, lat] =
+                        pixel_to_lon_lat(opts.origin_px + rx, opts.origin_py + ry, opts.zoom);
+                    [lon.clamp(-180.0, 180.0), lat.clamp(-90.0, 90.0)]
                 })
                 .collect();
             if projected.len() < 4 {
                 return None;
             }
             let abs_area = signed_area(&projected).abs();
+            let bbox = ring_bbox(&projected);
             Some(RingHierarchyItem {
                 ring: projected,
+                bbox,
                 abs_area,
                 parent: None,
                 depth: 0,
@@ -376,13 +450,11 @@ pub fn mask_to_feature_collection(
     for idx in 0..items.len() {
         let mut parent_area = f64::INFINITY;
         let mut parent_idx = None;
+        let child_bbox = items[idx].bbox;
         for cand in 0..idx {
             if items[cand].abs_area < parent_area
-                && items[idx]
-                    .ring
-                    .iter()
-                    .take(items[idx].ring.len().saturating_sub(1))
-                    .any(|&p| point_in_ring(p, &items[cand].ring))
+                && bbox_contains(items[cand].bbox, child_bbox)
+                && ring_strictly_inside(&items[idx].ring, &items[cand].ring)
             {
                 parent_idx = Some(cand);
                 parent_area = items[cand].abs_area;
@@ -406,9 +478,6 @@ pub fn mask_to_feature_collection(
             }
             continue;
         }
-        if ring_area_km2(&item.ring) < opts.min_area_km2 {
-            continue;
-        }
         poly_rings.insert(idx, vec![ensure_winding(&item.ring, true)]);
         shell_order.push(idx);
     }
@@ -420,6 +489,9 @@ pub fn mask_to_feature_collection(
             let outer_area = ring_area_km2(&coords[0]);
             let hole_area: f64 = coords[1..].iter().map(|h| ring_area_km2(h)).sum();
             let net_area = (outer_area - hole_area).max(0.0);
+            if net_area < opts.min_area_km2 {
+                continue;
+            }
             total_area_km2 += net_area;
             features.push(json!({
                 "type": "Feature",
@@ -504,15 +576,20 @@ pub struct FloodExtentResult {
     pub zoom: u8,
     pub polygon_count: usize,
     pub total_area_km2: f64,
+    /// Number of tile requests that failed or could not be decoded (0 when coverage was complete).
+    #[serde(default)]
+    pub failed_tiles: usize,
     /// Explicitly marks whether this extent is OPERA-observed (not human-QAed).
     pub provenance: String,
     pub feature_collection: Value,
 }
 
-/// Decodes a PNG byte slice into [`RgbaImage`].
+/// Decodes a PNG byte slice into 8-bit [`RgbaImage`].
 pub fn decode_png_rgba(bytes: &[u8]) -> Result<RgbaImage> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
+    decoder.set_transformations(
+        png::Transformations::EXPAND | png::Transformations::ALPHA | png::Transformations::STRIP_16,
+    );
     let mut reader = decoder
         .read_info()
         .map_err(|e| OperaError::Image(format!("PNG header decode failed: {e}")))?;
@@ -562,26 +639,29 @@ pub fn decode_png_rgba(bytes: &[u8]) -> Result<RgbaImage> {
 }
 
 /// Tile-grid bounds for a bbox at a given Web Mercator zoom.
-#[cfg(feature = "http")]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TileGridBounds {
     pub tx0: u32,
     pub ty0: u32,
     pub tx1: u32,
     pub ty1: u32,
+    #[cfg(feature = "http")]
     pub gx0: f64,
+    #[cfg(feature = "http")]
     pub gy0: f64,
+    #[cfg(feature = "http")]
     pub gx1: f64,
+    #[cfg(feature = "http")]
     pub gy1: f64,
 }
 
 /// Computes tile grid bounds for `bbox` at `zoom`.
-#[cfg(feature = "http")]
 pub(crate) fn tile_grid_for_bbox(bbox: BBox, zoom: u8) -> Result<TileGridBounds> {
     let safe = bbox.clamp_mercator()?;
-    let (gx0, gy0) = lon_lat_to_pixel(safe.west, safe.north, zoom);
-    let (gx1, gy1) = lon_lat_to_pixel(safe.east, safe.south, zoom);
-    let max_idx = (1u32 << zoom).saturating_sub(1);
+    let z = zoom.min(MAX_MERCATOR_ZOOM);
+    let (gx0, gy0) = lon_lat_to_pixel(safe.west, safe.north, z);
+    let (gx1, gy1) = lon_lat_to_pixel(safe.east, safe.south, z);
+    let max_idx = (1u32 << z).saturating_sub(1);
     let clamp_idx = |v: f64| -> u32 { v.clamp(0.0, f64::from(max_idx)) as u32 };
     let tx0 = clamp_idx((gx0 / TILE_SIZE as f64).floor());
     let ty0 = clamp_idx((gy0 / TILE_SIZE as f64).floor());
@@ -592,9 +672,13 @@ pub(crate) fn tile_grid_for_bbox(bbox: BBox, zoom: u8) -> Result<TileGridBounds>
         ty0,
         tx1,
         ty1,
+        #[cfg(feature = "http")]
         gx0,
+        #[cfg(feature = "http")]
         gy0,
+        #[cfg(feature = "http")]
         gx1,
+        #[cfg(feature = "http")]
         gy1,
     })
 }
@@ -618,9 +702,14 @@ pub fn derive_flood_extent(opts: &FloodExtentOptions) -> Result<FloodExtentResul
     let mut granules_used = Vec::new();
 
     for prod_name in &opts.products {
-        let short_name = find_product(prod_name)
-            .map(|p| p.short_name)
-            .unwrap_or_else(|_| prod_name.clone());
+        let prod = find_product(prod_name)?;
+        if !prod.short_name.to_ascii_uppercase().contains("DSWX") {
+            return Err(OperaError::InvalidInput(format!(
+                "flood_extent requires DSWx products (DSWx-HLS or DSWx-S1), got '{}'",
+                prod.short_name
+            )));
+        }
+        let short_name = prod.short_name;
         let search = search_granules(&CmrSearchParams {
             product: short_name.clone(),
             bbox: Some(opts.bbox),
@@ -628,7 +717,7 @@ pub fn derive_flood_extent(opts: &FloodExtentOptions) -> Result<FloodExtentResul
             end: Some(opts.end.clone()),
             limit: opts.max_granules_per_product.clamp(1, 25),
             deduplicate_versions: true,
-            newest_per_tile: true,
+            newest_per_tile: false,
             cmr_endpoint: opts.cmr_endpoint.clone(),
         })?;
         if search.granules.is_empty() {
@@ -681,54 +770,80 @@ pub fn derive_flood_extent(opts: &FloodExtentOptions) -> Result<FloodExtentResul
         }
     }
 
-    #[cfg(feature = "parallel")]
-    let fetched: Vec<(u32, u32, Option<RgbaImage>)> = {
-        use rayon::prelude::*;
-        urls.into_par_iter()
-            .map(|(tx, ty, url)| {
-                let img = crate::cmr::http_get_bytes(&url)
-                    .ok()
-                    .and_then(|b| decode_png_rgba(&b).ok());
-                (tx, ty, img)
-            })
-            .collect()
-    };
-
-    #[cfg(not(feature = "parallel"))]
-    let fetched: Vec<(u32, u32, Option<RgbaImage>)> = urls
-        .into_iter()
-        .map(|(tx, ty, url)| {
-            let img = crate::cmr::http_get_bytes(&url)
-                .ok()
-                .and_then(|b| decode_png_rgba(&b).ok());
-            (tx, ty, img)
-        })
-        .collect();
-
+    // Fetch and merge tiles in bounded batches so peak memory stays bounded even for large grids.
+    const BATCH_SIZE: usize = 16;
     let mut mask = vec![0u8; stitch_w * stitch_h];
-    for (tx, ty, img_opt) in fetched {
-        let Some(img) = img_opt else { continue };
-        let ox = (tx - tx0) as usize * TILE_SIZE;
-        let oy = (ty - ty0) as usize * TILE_SIZE;
-        let copy_h = TILE_SIZE.min(img.height);
-        let copy_w = TILE_SIZE.min(img.width);
-        for py in 0..copy_h {
-            for px in 0..copy_w {
-                let alpha = img.data[(py * img.width + px) * 4 + 3];
-                let sx = ox + px;
-                let sy = oy + py;
-                let global_x = origin_px + (sx as f64) + 0.5;
-                let global_y = origin_py + (sy as f64) + 0.5;
-                if alpha > opts.alpha_threshold
-                    && global_x >= gx0
-                    && global_x <= gx1
-                    && global_y >= gy0
-                    && global_y <= gy1
-                {
-                    mask[sy * stitch_w + sx] = 1;
+    let mut succeeded_tiles = 0usize;
+    let mut failed_tiles = 0usize;
+    let mut first_error: Option<String> = None;
+
+    for chunk in urls.chunks(BATCH_SIZE) {
+        #[cfg(feature = "parallel")]
+        let batch_results: Vec<(u32, u32, Result<RgbaImage>)> = {
+            use rayon::prelude::*;
+            chunk
+                .par_iter()
+                .map(|(tx, ty, url)| {
+                    let res = crate::cmr::http_get_bytes(url).and_then(|b| decode_png_rgba(&b));
+                    (*tx, *ty, res)
+                })
+                .collect()
+        };
+
+        #[cfg(not(feature = "parallel"))]
+        let batch_results: Vec<(u32, u32, Result<RgbaImage>)> = chunk
+            .iter()
+            .map(|(tx, ty, url)| {
+                let res = crate::cmr::http_get_bytes(url).and_then(|b| decode_png_rgba(&b));
+                (*tx, *ty, res)
+            })
+            .collect();
+
+        for (tx, ty, res) in batch_results {
+            let img = match res {
+                Ok(img) => {
+                    succeeded_tiles += 1;
+                    img
+                }
+                Err(e) => {
+                    failed_tiles += 1;
+                    if first_error.is_none() {
+                        first_error = Some(e.to_string());
+                    }
+                    continue;
+                }
+            };
+            let ox = (tx - tx0) as usize * TILE_SIZE;
+            let oy = (ty - ty0) as usize * TILE_SIZE;
+            let copy_h = TILE_SIZE.min(img.height);
+            let copy_w = TILE_SIZE.min(img.width);
+            for py in 0..copy_h {
+                for px in 0..copy_w {
+                    let alpha = img.data[(py * img.width + px) * 4 + 3];
+                    let sx = ox + px;
+                    let sy = oy + py;
+                    let global_x = origin_px + (sx as f64) + 0.5;
+                    let global_y = origin_py + (sy as f64) + 0.5;
+                    if alpha > opts.alpha_threshold
+                        && global_x >= gx0
+                        && global_x <= gx1
+                        && global_y >= gy0
+                        && global_y <= gy1
+                    {
+                        mask[sy * stitch_w + sx] = 1;
+                    }
                 }
             }
         }
+    }
+
+    if succeeded_tiles == 0 {
+        return Err(OperaError::Http(format!(
+            "all {failed_tiles} DSWx tile request(s) failed{}",
+            first_error
+                .map(|e| format!(" (first error: {e})"))
+                .unwrap_or_default()
+        )));
     }
 
     let (sampled, sw, sh, used_scale) =
@@ -743,6 +858,8 @@ pub fn derive_flood_extent(opts: &FloodExtentOptions) -> Result<FloodExtentResul
             origin_py,
             scale: used_scale,
             min_area_km2: opts.min_area_km2,
+            source_width: Some(stitch_w),
+            source_height: Some(stitch_h),
         },
     );
     let polygon_count = feature_collection["features"]
@@ -758,6 +875,7 @@ pub fn derive_flood_extent(opts: &FloodExtentOptions) -> Result<FloodExtentResul
         zoom,
         polygon_count,
         total_area_km2,
+        failed_tiles,
         provenance: "OPERA-observed water extent (not human-QAed)".to_string(),
         feature_collection,
     })
@@ -796,12 +914,41 @@ mod tests {
                 origin_py: 24000.0,
                 scale: 1,
                 min_area_km2: 0.0,
+                source_width: Some(5),
+                source_height: Some(5),
             },
         );
         let feats = fc["features"].as_array().unwrap();
         assert_eq!(feats.len(), 1, "hole nested into single Polygon feature");
         let coords = feats[0]["geometry"]["coordinates"].as_array().unwrap();
         assert_eq!(coords.len(), 2, "exterior ring + 1 hole ring");
+        assert!(area > 0.0);
+    }
+
+    #[test]
+    fn corner_touching_water_components_stay_separate_shells() {
+        // Row 0: [0, 1, 1], Row 1: [1, 0, 0] -> two wet components touching at one corner.
+        let mask = [0u8, 1, 1, 1, 0, 0];
+        let (fc, area) = mask_to_feature_collection(
+            &mask,
+            3,
+            2,
+            MaskVectorizeOptions {
+                zoom: 8,
+                origin_px: 32000.0,
+                origin_py: 24000.0,
+                scale: 1,
+                min_area_km2: 0.0,
+                source_width: Some(3),
+                source_height: Some(2),
+            },
+        );
+        let feats = fc["features"].as_array().unwrap();
+        assert_eq!(
+            feats.len(),
+            2,
+            "corner-touching components must not nest as holes"
+        );
         assert!(area > 0.0);
     }
 
