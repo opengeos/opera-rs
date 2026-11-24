@@ -1,0 +1,29 @@
+[package]
+name = "opera-js"
+description = "WebAssembly bindings for opera-rs: NASA OPERA catalog, CMR UMM-G parsing, titiler-cmr URL & statistics analytics, Sentinel-1 burst/DISP-S1 utilities, and missing-data optimization in browsers and Node.js (zero GDAL)"
+publish = false
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.90"
+repository = "https://github.com/opengeos/opera-rs"
+authors = ["Qiusheng Wu <giswqs@gmail.com>"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+opera-rs = { path = "../crates/opera-rs", default-features = false }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+serde = "1"
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

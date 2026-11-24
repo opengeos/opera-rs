@@ -9,7 +9,7 @@
 
 Pure-Rust, agent-centric toolkit for searching, visualizing, and analyzing [NASA OPERA](https://www.jpl.nasa.gov/go/opera) satellite products (DSWx-HLS, DSWx-S1, DIST-ALERT, DIST-ANN, RTC-S1, CSLC-S1, DISP-S1), powered by [`terrio`](https://github.com/opengeos/terrio), NASA's public CMR API, and [`titiler-cmr`](https://github.com/developmentseed/titiler-cmr) with **zero GDAL dependencies** (`--no-default-features` has zero C/C++ dependencies) and **no Earthdata login required**.
 
-**Documentation:** [Installation](https://opera-rs.opengeos.org/installation/) | [Notebooks](https://opera-rs.opengeos.org/notebooks/) | [CLI](https://opera-rs.opengeos.org/cli/) | [AI Agents (MCP)](https://opera-rs.opengeos.org/mcp/) | [Rust](https://opera-rs.opengeos.org/rust/) | [Python](https://opera-rs.opengeos.org/python/)
+**Documentation:** [Playground](https://opera-rs.opengeos.org/playground/) | [Installation](https://opera-rs.opengeos.org/installation/) | [Notebooks](https://opera-rs.opengeos.org/notebooks/) | [CLI](https://opera-rs.opengeos.org/cli/) | [AI Agents (MCP)](https://opera-rs.opengeos.org/mcp/) | [Rust](https://opera-rs.opengeos.org/rust/) | [Python](https://opera-rs.opengeos.org/python/)
 
 ## Highlights
 

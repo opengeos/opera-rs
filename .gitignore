@@ -1,4 +1,7 @@
 /target/
+js/target/
+js/pkg/
+js/pkg-node/
 python/target/
 python/dist/
 python/.venv/

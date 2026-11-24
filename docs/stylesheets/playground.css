@@ -1,0 +1,356 @@
+/* Interactive opera-rs WebAssembly & live NASA OPERA playground */
+#opera-playground .op-status {
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+}
+
+#opera-playground .op-error {
+  color: var(--md-code-hl-special-color, #dc2626);
+}
+
+#opera-playground .op-hint {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.72rem;
+}
+
+#opera-playground .op-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+  margin-bottom: 1rem;
+  padding-bottom: 0.45rem;
+}
+
+#opera-playground .op-tab {
+  padding: 0.42rem 0.8rem;
+  border: 1px solid var(--md-default-fg-color--lighter);
+  border-radius: 0.3rem;
+  background: var(--md-default-bg-color);
+  color: var(--md-default-fg-color);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+#opera-playground .op-tab:hover {
+  border-color: var(--md-accent-fg-color);
+}
+
+#opera-playground .op-tab--active {
+  background: var(--md-primary-fg-color);
+  border-color: var(--md-primary-fg-color);
+  color: var(--md-primary-bg-color);
+}
+
+#opera-playground .op-presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.85rem;
+  font-size: 0.74rem;
+}
+
+#opera-playground .op-presets > span:first-child {
+  font-weight: 600;
+  color: var(--md-default-fg-color--light);
+}
+
+#opera-playground .op-presets button,
+#opera-playground .op-icon-btn {
+  padding: 0.28rem 0.62rem;
+  border: 1px solid var(--md-default-fg-color--lighter);
+  border-radius: 0.25rem;
+  background: var(--md-default-bg-color);
+  color: var(--md-default-fg-color);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.73rem;
+}
+
+#opera-playground .op-presets button:hover,
+#opera-playground .op-icon-btn:hover {
+  border-color: var(--md-accent-fg-color);
+}
+
+#opera-playground .op-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr));
+  gap: 0.7rem;
+  align-items: end;
+  margin-bottom: 1rem;
+}
+
+#opera-playground .op-field--wide {
+  grid-column: span 2;
+}
+
+@media (max-width: 45em) {
+  #opera-playground .op-field--wide {
+    grid-column: span 1;
+  }
+}
+
+#opera-playground .op-field label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin-bottom: 0.2rem;
+}
+
+#opera-playground .op-field input,
+#opera-playground .op-field select,
+#opera-playground .op-field textarea {
+  width: 100%;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid var(--md-default-fg-color--lighter);
+  border-radius: 0.25rem;
+  background: var(--md-default-bg-color);
+  color: var(--md-default-fg-color);
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+#opera-playground .op-field textarea {
+  font-family: var(--md-code-font-family);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+#opera-playground .op-inline-input {
+  display: flex;
+  gap: 0.3rem;
+}
+
+#opera-playground .op-field--check {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  justify-content: flex-end;
+  padding-bottom: 0.2rem;
+}
+
+#opera-playground .op-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  font-weight: 500;
+  margin: 0;
+  cursor: pointer;
+}
+
+#opera-playground .op-inline-check input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
+#opera-playground .op-action button {
+  width: 100%;
+}
+
+#opera-playground .op-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  gap: 0.55rem;
+  margin: 0.75rem 0 1rem;
+}
+
+#opera-playground .op-stat {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.35rem;
+  padding: 0.5rem 0.65rem;
+  background: var(--md-code-bg-color);
+}
+
+#opera-playground .op-stat strong {
+  display: block;
+  font-size: 0.96rem;
+  line-height: 1.25;
+}
+
+#opera-playground .op-stat span {
+  font-size: 0.68rem;
+  color: var(--md-default-fg-color--light);
+}
+
+#opera-playground .op-map-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+  margin-bottom: 1.1rem;
+}
+
+@media (max-width: 62em) {
+  #opera-playground .op-map-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+#opera-playground .op-map-card,
+#opera-playground .op-side-card {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.4rem;
+  padding: 0.75rem;
+  background: var(--md-code-bg-color);
+}
+
+#opera-playground .op-map-toolbar,
+#opera-playground .op-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+#opera-playground .op-card-head h4 {
+  margin: 0;
+}
+
+#opera-playground .op-map {
+  width: 100%;
+  height: 430px;
+  border-radius: 0.3rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  background: var(--md-default-bg-color);
+  overflow: hidden;
+}
+
+#opera-playground .op-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.55rem;
+  font-size: 0.71rem;
+}
+
+#opera-playground .op-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+#opera-playground .op-legend-item i {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 0.15rem;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+}
+
+#opera-playground .op-point-box {
+  margin-top: 0.55rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 0.25rem;
+  background: var(--md-default-bg-color);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  font-family: var(--md-code-font-family);
+  font-size: 0.72rem;
+}
+
+#opera-playground #op-stats-chart,
+#opera-playground #op-md-canvas {
+  width: 100%;
+  height: auto;
+  display: block;
+  background: var(--md-default-bg-color);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.25rem;
+}
+
+#opera-playground #op-md-canvas {
+  cursor: pointer;
+}
+
+#opera-playground .op-code-details {
+  margin-top: 0.75rem;
+  font-size: 0.74rem;
+}
+
+#opera-playground .op-code-details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+#opera-playground .op-code-details pre {
+  margin: 0.45rem 0 0;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.25rem;
+  background: var(--md-default-bg-color);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  overflow-x: auto;
+  font-size: 0.69rem;
+}
+
+#opera-playground .op-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+#opera-playground .op-mt {
+  margin-top: 0.65rem;
+}
+
+#opera-playground .op-table-wrap,
+#opera-playground .op-mini-table-wrap {
+  max-height: 20rem;
+  overflow: auto;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.3rem;
+  background: var(--md-default-bg-color);
+}
+
+#opera-playground .op-mini-table-wrap {
+  margin-top: 0.55rem;
+  max-height: 12rem;
+}
+
+#opera-playground .op-table-wrap--tall {
+  max-height: 22rem;
+}
+
+#opera-playground table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.71rem;
+}
+
+#opera-playground th,
+#opera-playground td {
+  padding: 0.32rem 0.45rem;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+  text-align: left;
+  white-space: nowrap;
+}
+
+#opera-playground th {
+  position: sticky;
+  top: 0;
+  background: var(--md-code-bg-color);
+  font-weight: 600;
+}
+
+#opera-playground tbody tr.op-clickable {
+  cursor: pointer;
+}
+
+#opera-playground tbody tr.op-clickable:hover {
+  background: var(--md-accent-fg-color--transparent);
+}
+
+#opera-playground tbody tr.op-row-selected {
+  background: rgba(42, 157, 143, 0.22);
+  font-weight: 600;
+}
+
+#opera-playground [hidden] {
+  display: none !important;
+}

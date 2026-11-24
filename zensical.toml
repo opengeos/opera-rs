@@ -5,10 +5,13 @@ site_author = "opengeos"
 site_url = "https://opera-rs.opengeos.org"
 repo_url = "https://github.com/opengeos/opera-rs"
 repo_name = "opengeos/opera-rs"
+extra_css = ["stylesheets/playground.css"]
+extra_javascript = ["javascripts/playground.js"]
 copyright = "opera-rs is released under the MIT License. See <a href=\"https://github.com/opengeos/opera-rs/blob/main/NOTICE\">NOTICE</a>."
 
 nav = [
   { "Home" = "index.md" },
+  { "Playground" = "playground.md" },
   { "Installation" = "installation.md" },
   { "Notebooks" = "notebooks.md" },
   { "CLI Reference" = "cli.md" },
