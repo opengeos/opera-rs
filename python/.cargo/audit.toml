@@ -1,0 +1,28 @@
+# cargo audit's settings for the python/ workspace, read when `cargo audit` runs from python/.
+# It mirrors the root .cargo/audit.toml, since python/ has its own Cargo.lock; keep both in sync.
+# Vulnerabilities fail it; unsound advisories (heapless 0.8.0, via geo -> rstar 0.12) are warnings.
+
+[advisories]
+# All nine come from wbraster 0.2.1, an unconditional dependency of terrio 0.9.0 (opera-rs's `geo`
+# feature). wbraster 0.2.1 is its latest release and requires zip 8.6.0 and ruzstd 0.8.3; no
+# compatible release fixes them. terrio ignores the same IDs for the same reasons. Remove these when
+# a terrio release no longer pulls in zip < 9.0.5 or ruzstd < 0.9.1.
+ignore = [
+    # zip 8.6.0: `ZipArchive::extract` and `ZipStreamReader::extract` (SUID bits, symlink targets
+    # and permissions, large symlink entries, local-header names). Neither opera-rs, terrio nor
+    # wbraster calls them. opera-rs never uses the zip crate: it reads ZIP inputs (burst_db.rs)
+    # with its own in-tree reader.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0429",
+    "RUSTSEC-2026-0546",
+    "RUSTSEC-2026-0548",
+    # zip 8.6.0: WinZip AES entries (`aes-crypto`) and the legacy Shrink/Reduce/Implode decoders
+    # (`legacy-zip`). wbraster enables only `deflate`, so neither is compiled in.
+    "RUSTSEC-2026-0545",
+    "RUSTSEC-2026-0547",
+    # ruzstd 0.8.3: used only by wbraster's Zarr reader, which terrio reaches only with
+    # TERRIO_WBRASTER_FALLBACK=YES. opera-rs never opens Zarr stores.
+    "RUSTSEC-2026-0344",
+]
