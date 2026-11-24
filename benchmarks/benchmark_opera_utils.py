@@ -139,10 +139,16 @@ def main() -> None:
     record("Startup", "Python `import` (fresh process)", rs_imp, py_imp)
     record("Startup", "Python `import` + GeoPandas (fresh process)", rs_imp, py_imp_geo)
 
-    if Path(args.opera_bin).exists() and Path(args.opera_utils_bin).exists():
+    has_clis = Path(args.opera_bin).exists() and Path(args.opera_utils_bin).exists()
+    if has_clis:
         rs_cli = bench_proc([args.opera_bin, "--help"], repeats, warmup)
         py_cli = bench_proc([args.opera_utils_bin, "--help"], repeats, warmup)
         record("Startup", "CLI startup (`--help`)", rs_cli, py_cli)
+    else:
+        print(
+            f"[Startup     ] Skipping CLI benchmarks (missing executable: "
+            f"opera={args.opera_bin}, opera-utils={args.opera_utils_bin})"
+        )
 
     # 2. Burst ID & date parsing (10,000 realistic CSLC-S1 filenames)
     cslc_files = [

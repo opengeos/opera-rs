@@ -133,7 +133,7 @@ Measured on Linux x86_64 (Python 3.12, release build) against identical local ca
 
 | Benchmark | `opera-rs` | Python (`opera-utils` + `geopandas`) | Speedup / Savings |
 | --- | --- | --- | --- |
-| Installed footprint (wheel / `site-packages`) | **1 pkg / 38 MB** (0 GDAL/C deps) | 56 pkgs / 446 MB | **11.7x smaller** |
+| Installed footprint (wheel / `site-packages`) | **1 pkg / 38 MB** (0 GDAL deps) | 56 pkgs / 446 MB | **11.7x smaller** |
 | Python `import` (fresh process) | **27.6 ms** | 523.9 ms | **19.0x faster** |
 | CLI cold start (standalone `opera --help` vs `opera-utils --help`) | **3.2 ms** | 847.5 ms | **263x faster** |
 | `get_dates` x 10,000 CSLC filenames (Python API) | **5.3 ms** | 92.7 ms | **17.5x faster** |
