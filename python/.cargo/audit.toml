@@ -1,16 +1,17 @@
-# cargo audit's settings for this workspace, read when `cargo audit` runs from the repository root.
+# cargo audit's settings for the python/ workspace, read when `cargo audit` runs from python/.
+# It mirrors the root .cargo/audit.toml, since python/ has its own Cargo.lock; keep both in sync.
 # Vulnerabilities fail it; unsound advisories (heapless 0.8.0, via geo -> rstar 0.12) are warnings.
-# python/ is a separate workspace with its own Cargo.lock and keeps a copy in python/.cargo/.
 
 [advisories]
 # All nine come from wbraster 0.2.1, an unconditional dependency of terrio 0.9.0 (opera-rs's `geo`
 # feature). wbraster 0.2.1 is its latest release and requires zip 8.6.0 and ruzstd 0.8.3; no
 # compatible release fixes them. terrio ignores the same IDs for the same reasons. Remove these when
-# a terrio release no longer pulls in zip < 9 or ruzstd < 0.9.1.
+# a terrio release no longer pulls in zip < 9.0.5 or ruzstd < 0.9.1.
 ignore = [
     # zip 8.6.0: `ZipArchive::extract` and `ZipStreamReader::extract` (SUID bits, symlink targets
     # and permissions, large symlink entries, local-header names). Neither opera-rs, terrio nor
-    # wbraster calls them; opera-rs only uses terrio's GeoTIFF, vector and CRS APIs.
+    # wbraster calls them. opera-rs never uses the zip crate: it reads ZIP inputs (burst_db.rs)
+    # with its own in-tree reader.
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
