@@ -353,7 +353,7 @@ def group_by_burst(files: list[str | Path]) -> dict[str, list[str]]:
 
 
 def get_dates(filename: str | Path) -> list[str]:
-    """Extract ``YYYY-MM-DD`` acquisition dates from a filename stem."""
+    """Extract all ``YYYY-MM-DD`` dates from a filename stem."""
     return list(_opera_rs.get_dates_py(str(filename)))
 
 

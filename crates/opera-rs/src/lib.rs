@@ -62,6 +62,7 @@ pub use geocode::{DEFAULT_NOMINATIM_ENDPOINT, GeocodedPlace, geocode_place};
 pub use missing_data::{
     BurstSubsetOption, generate_burst_subset_options, get_burst_id_date_incidence,
     get_burst_id_to_dates, get_missing_data_options, get_missing_data_options_from_pairs,
+    get_missing_data_options_limited,
 };
 pub use products::{
     DIST_STATUS_COLORMAP_JSON, DSWX_OPEN_WATER_CLASS, DSWX_PARTIAL_WATER_CLASS,

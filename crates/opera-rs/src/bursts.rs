@@ -37,8 +37,15 @@ pub struct ParsedCslcFilename {
     pub frame_id: Option<u32>,
     /// Normalized Sentinel-1 burst ID (e.g. `t087_185683_iw2`).
     pub burst_id: String,
-    /// Acquisition start UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`).
+    /// Acquisition start UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) for standard CSLCs, or the
+    /// reference timestamp for `COMPRESSED-CSLC-S1` products.
     pub start_datetime: String,
+    /// Earliest acquisition timestamp in the ministack (`COMPRESSED-CSLC-S1` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ministack_start_datetime: Option<String>,
+    /// Latest acquisition timestamp in the ministack (`COMPRESSED-CSLC-S1` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ministack_stop_datetime: Option<String>,
     /// Product generation UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`).
     pub generation_datetime: String,
     /// Sensor identifier (`S1A`, `S1B`, `S1C`, etc.), if present in filename.
@@ -57,9 +64,11 @@ pub fn normalize_burst_id(burst_id: &str) -> String {
 
 /// Extracts and parses a Sentinel-1 burst ID from a burst string, file path, granule UR, or URL.
 ///
+/// Scans the filename basename so parent directory names cannot shadow the file's own burst ID.
 /// Matches both official (`T087-185683-IW2`) and COMPASS / burst-DB (`t087_185683_iw2`) forms.
 pub fn parse_burst_id(input: &str) -> Result<ParsedBurstId> {
-    let bytes = input.as_bytes();
+    let target = basename_for_parsing(input);
+    let bytes = target.as_bytes();
     // Pattern: [tT](\d{3})[-_](\d{6})[-_][iI][wW]([1-3]) -> length 15
     if bytes.len() >= 15 {
         for i in 0..=bytes.len() - 15 {
@@ -328,6 +337,8 @@ pub fn parse_cslc_filename(input: &str) -> Result<ParsedCslcFilename> {
             frame_id: None,
             burst_id: burst.normalized,
             start_datetime,
+            ministack_start_datetime: None,
+            ministack_stop_datetime: None,
             generation_datetime,
             sensor: Some(sensor),
             polarization,
@@ -360,9 +371,21 @@ pub fn parse_cslc_filename(input: &str) -> Result<ParsedCslcFilename> {
         let burst = parse_burst_id(parts[offset])?;
         let start_datetime = parse_compact_datetime_iso(parts[offset + 1]).ok_or_else(|| {
             OperaError::InvalidInput(format!(
-                "invalid compressed CSLC start datetime in '{input}'"
+                "invalid compressed CSLC reference datetime in '{input}'"
             ))
         })?;
+        let ministack_start_datetime =
+            parse_compact_datetime_iso(parts[offset + 2]).ok_or_else(|| {
+                OperaError::InvalidInput(format!(
+                    "invalid compressed CSLC ministack start datetime in '{input}'"
+                ))
+            })?;
+        let ministack_stop_datetime =
+            parse_compact_datetime_iso(parts[offset + 3]).ok_or_else(|| {
+                OperaError::InvalidInput(format!(
+                    "invalid compressed CSLC ministack stop datetime in '{input}'"
+                ))
+            })?;
         let generation_datetime =
             parse_compact_datetime_iso(parts[offset + 4]).ok_or_else(|| {
                 OperaError::InvalidInput(format!(
@@ -380,6 +403,8 @@ pub fn parse_cslc_filename(input: &str) -> Result<ParsedCslcFilename> {
             frame_id,
             burst_id: burst.normalized,
             start_datetime,
+            ministack_start_datetime: Some(ministack_start_datetime),
+            ministack_stop_datetime: Some(ministack_stop_datetime),
             generation_datetime,
             sensor: None,
             polarization,
@@ -412,6 +437,10 @@ mod tests {
         let compass = parse_burst_id("inputs/t042_088905_iw1_20230101.h5").unwrap();
         assert_eq!(compass.normalized, "t042_088905_iw1");
         assert_eq!(compass.official, "T042-088905-IW1");
+        // Parent directory burst ID must not shadow the filename's own burst ID.
+        let nested =
+            parse_burst_id("/archive/t087_185683_iw1/t087_185684_iw2_20230322.h5").unwrap();
+        assert_eq!(nested.normalized, "t087_185684_iw2");
         assert!(parse_burst_id("no_burst_here.tif").is_err());
     }
 

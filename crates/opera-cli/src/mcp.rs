@@ -74,7 +74,7 @@ const READ_ONLY: &[&str] = &[
     "disp-search",
 ];
 
-/// Commands that contact external network services (NASA CMR, titiler-cmr, Nominatim, GitHub burst_db).
+/// Commands that contact external network services (NASA CMR, titiler-cmr, Nominatim, CARTO, GitHub burst_db).
 const OPEN_WORLD: &[&str] = &[
     "geocode",
     "search",

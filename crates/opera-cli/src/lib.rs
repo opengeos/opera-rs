@@ -12,9 +12,9 @@ use opera_rs::analysis::{
     fetch_time_series_candidates,
 };
 use opera_rs::burst_db::{
-    FrameBBox, frame_ids_from_geojson, get_frame_bbox, get_frame_geojson, get_frame_ids_for_burst,
-    get_frame_orbit_pass, get_frame_to_burst_mapping, get_intersecting_frames,
-    get_intersecting_frames_for_point, reproject_bbox_to_wgs84,
+    FrameBBox, OrbitPass, frame_ids_from_geojson, get_frame_bbox, get_frame_geojson,
+    get_frame_ids_for_burst, get_frame_orbit_pass, get_frame_to_burst_mapping,
+    get_intersecting_frames, get_intersecting_frames_for_point, reproject_bbox_to_wgs84,
 };
 use opera_rs::bursts::{get_dates, group_by_burst, parse_burst_id};
 use opera_rs::cmr::{CmrSearchParams, resolve_aoi_layer, resolve_concept_id, search_granules};
@@ -22,7 +22,7 @@ use opera_rs::disp::{DispSearchParams, UrlType, search_disp_products};
 use opera_rs::flood_extent::{FloodExtentOptions, derive_flood_extent};
 use opera_rs::geo_io::{inspect_local_raster, read_aoi_bbox, write_feature_collection};
 use opera_rs::geocode::geocode_place;
-use opera_rs::missing_data::get_missing_data_options;
+use opera_rs::missing_data::get_missing_data_options_limited;
 use opera_rs::products::{
     LayerStyle, catalog, expression_presets, find_product, should_use_categorical,
 };
@@ -1838,23 +1838,30 @@ fn dispatch(command: Commands) -> Result<()> {
                 }
             };
 
-            if (geom_file.is_some() || db_file.is_none())
-                && let Ok(pass) = get_frame_orbit_pass(frame_id, geom_file.as_deref())
-            {
-                info.orbit_pass = Some(pass);
-            }
-
             let written = if let Some(out_path) = output {
                 let fc = get_frame_geojson(Some(&[frame_id]), geom_file.as_deref())?;
+                if let Some(pass_str) = fc
+                    .get("features")
+                    .and_then(Value::as_array)
+                    .and_then(|arr| arr.first())
+                    .and_then(|f| f.get("properties"))
+                    .and_then(|p| p.get("orbit_pass"))
+                    .and_then(Value::as_str)
+                {
+                    info.orbit_pass = Some(pass_str.parse::<OrbitPass>()?);
+                }
                 let count = write_feature_collection(&fc, &out_path, "disp_frame")?;
                 Some((out_path, count))
             } else {
+                if geom_file.is_some() {
+                    info.orbit_pass = Some(get_frame_orbit_pass(frame_id, geom_file.as_deref())?);
+                }
                 None
             };
 
             if as_json {
                 let mut val = serde_json::to_value(&info)?;
-                val["epsg"] = json!(fb.epsg);
+                val["bbox_epsg"] = json!(fb.epsg);
                 val["bbox"] = json!(fb.bbox);
                 if let Some((ref p, count)) = written {
                     val["written"] = json!({ "path": p, "features": count });
@@ -1970,8 +1977,7 @@ fn dispatch(command: Commands) -> Result<()> {
                     "provide CSLC filenames as positional arguments or via --file".into(),
                 ));
             }
-            let mut options = get_missing_data_options(&all_files)?;
-            options.truncate(max_options.max(1));
+            let options = get_missing_data_options_limited(&all_files, Some(max_options.max(1)))?;
 
             let mut written_paths = Vec::new();
             if write_options {

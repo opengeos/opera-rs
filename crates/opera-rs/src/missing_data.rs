@@ -12,12 +12,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::bursts::{get_burst_id, get_dates, normalize_burst_id};
+use crate::bursts::{
+    basename_for_parsing, get_burst_id, get_dates, normalize_burst_id, parse_cslc_filename,
+};
 use crate::error::{OperaError, Result};
 use crate::types::CalendarDate;
 
 /// Cap on combinations of missing-date groups evaluated to avoid exponential blowup
-/// (matches `opera-utils` `1e4` cap).
+/// (matches `opera-utils` `1e4` cap). When reached, returned subsets are best-found rather than
+/// guaranteed globally optimal, and `search_truncated` is set to `true`.
 const MAX_MISSING_GROUP_COMBINATIONS: usize = 10_000;
 
 /// One valid rectangular subset of Sentinel-1 bursts and acquisition dates.
@@ -37,23 +40,35 @@ pub struct BurstSubsetOption {
     pub num_candidate_bursts: usize,
     /// Number of candidate acquisitions excluded by this subset.
     pub excluded_bursts: usize,
+    /// `true` when the missing-date group search hit the 10,000-combination cap.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub search_truncated: bool,
     /// Subset of original input filenames/URLs matching this option (empty when constructed from pairs).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<String>,
 }
 
+fn extract_acquisition_date(file: &str) -> Result<CalendarDate> {
+    let base = basename_for_parsing(file);
+    if base.starts_with("OPERA_L2_CSLC-S1_") || base.starts_with("OPERA_L2_COMPRESSED-CSLC-S1_") {
+        let parsed = parse_cslc_filename(file)?;
+        return CalendarDate::parse(&parsed.start_datetime[..10]);
+    }
+    let dates = get_dates(file);
+    dates.first().copied().ok_or_else(|| {
+        OperaError::InvalidInput(format!("could not extract acquisition date from '{file}'"))
+    })
+}
+
 /// Builds a mapping from normalized burst ID to sorted acquisition dates from CSLC filenames/URLs.
 ///
-/// Assumes the first `YYYYMMDD` date in each filename stem is the acquisition date (as in
-/// `OPERA_L2_CSLC-S1` products). Returns an error if any `(burst_id, date)` pair is duplicated.
+/// Strictly parses the acquisition timestamp field for `OPERA_L2_CSLC-S1` /
+/// `OPERA_L2_COMPRESSED-CSLC-S1` filenames. Returns an error on invalid dates or duplicate pairs.
 pub fn get_burst_id_to_dates(slc_files: &[String]) -> Result<BTreeMap<String, Vec<CalendarDate>>> {
     let mut pairs: Vec<(String, CalendarDate)> = Vec::with_capacity(slc_files.len());
     for file in slc_files {
         let burst = get_burst_id(file)?;
-        let dates = get_dates(file);
-        let first = *dates.first().ok_or_else(|| {
-            OperaError::InvalidInput(format!("could not extract acquisition date from '{file}'"))
-        })?;
+        let first = extract_acquisition_date(file)?;
         pairs.push((burst, first));
     }
     burst_id_mapping_from_pairs(&pairs)
@@ -110,15 +125,34 @@ pub fn get_burst_id_date_incidence(
 }
 
 /// Generates ranked valid `(burst_ids x dates)` subsets from an incidence matrix.
+///
+/// Validates matrix dimensions against `burst_ids.len()` and `dates.len()`. When more than
+/// 10,000 missing-date group combinations exist, stops at the cap and marks `search_truncated = true`.
 pub fn generate_burst_subset_options(
     incidence: &[Vec<bool>],
     burst_ids: &[String],
     dates: &[CalendarDate],
-) -> Vec<BurstSubsetOption> {
+) -> Result<Vec<BurstSubsetOption>> {
+    if incidence.len() != burst_ids.len() {
+        return Err(OperaError::InvalidInput(format!(
+            "incidence row count ({}) does not match burst_ids length ({})",
+            incidence.len(),
+            burst_ids.len()
+        )));
+    }
+    for (r, row) in incidence.iter().enumerate() {
+        if row.len() != dates.len() {
+            return Err(OperaError::InvalidInput(format!(
+                "incidence row {r} length ({}) does not match dates length ({})",
+                row.len(),
+                dates.len()
+            )));
+        }
+    }
     let n_rows = incidence.len();
     let n_cols = dates.len();
     if n_rows == 0 || n_cols == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let num_candidate_bursts: usize = incidence
@@ -142,18 +176,20 @@ pub fn generate_burst_subset_options(
     // capped at MAX_MISSING_GROUP_COMBINATIONS.
     let mut exclude_combos: Vec<BTreeSet<usize>> = Vec::new();
     let mut combo_count = 0usize;
+    let mut truncated = false;
     'outer: for k in 0..=missing_groups.len() {
         let mut indices: Vec<usize> = (0..k).collect();
         loop {
+            if combo_count >= MAX_MISSING_GROUP_COMBINATIONS {
+                truncated = true;
+                break 'outer;
+            }
             let mut excluded = BTreeSet::new();
             for &idx in &indices {
                 excluded.extend(missing_groups[idx].iter().copied());
             }
             exclude_combos.push(excluded);
             combo_count += 1;
-            if combo_count >= MAX_MISSING_GROUP_COMBINATIONS {
-                break 'outer;
-            }
             if k == 0 {
                 break;
             }
@@ -217,6 +253,7 @@ pub fn generate_burst_subset_options(
             dates: selected_dates,
             num_candidate_bursts,
             excluded_bursts: num_candidate_bursts.saturating_sub(total_num_bursts),
+            search_truncated: truncated,
             inputs: Vec::new(),
         });
     }
@@ -227,29 +264,31 @@ pub fn generate_burst_subset_options(
             .then_with(|| b.num_burst_ids.cmp(&a.num_burst_ids))
             .then_with(|| b.num_dates.cmp(&a.num_dates))
     });
-    options
+    Ok(options)
 }
 
-/// Computes ranked valid subsets from a list of OPERA CSLC filenames or URLs, populating
-/// each option's matching `inputs`.
-pub fn get_missing_data_options(slc_files: &[String]) -> Result<Vec<BurstSubsetOption>> {
+/// Computes ranked valid subsets from a list of OPERA CSLC filenames or URLs, applying an
+/// optional `max_options` truncation BEFORE cloning matching filenames into `inputs`.
+pub fn get_missing_data_options_limited(
+    slc_files: &[String],
+    max_options: Option<usize>,
+) -> Result<Vec<BurstSubsetOption>> {
     if slc_files.is_empty() {
         return Ok(Vec::new());
     }
     let burst_map = get_burst_id_to_dates(slc_files)?;
     let (burst_ids, dates, incidence) = get_burst_id_date_incidence(&burst_map);
-    let mut options = generate_burst_subset_options(&incidence, &burst_ids, &dates);
+    let mut options = generate_burst_subset_options(&incidence, &burst_ids, &dates)?;
+    if let Some(limit) = max_options {
+        options.truncate(limit);
+    }
 
-    // Pre-parse each file's (normalized burst_id, first acquisition date) once so input selection
+    // Pre-parse each file's (normalized burst_id, acquisition date) once so input selection
     // matches `get_burst_id_to_dates` and never triggers on generation/reference dates.
     let parsed_files: Vec<(String, CalendarDate, &String)> = slc_files
         .iter()
-        .filter_map(|f| {
-            let burst = get_burst_id(f).ok()?;
-            let acq_date = *get_dates(f).first()?;
-            Some((burst, acq_date, f))
-        })
-        .collect();
+        .map(|f| Ok((get_burst_id(f)?, extract_acquisition_date(f)?, f)))
+        .collect::<Result<Vec<_>>>()?;
 
     for opt in &mut options {
         let allowed_dates: BTreeSet<CalendarDate> = opt
@@ -267,6 +306,12 @@ pub fn get_missing_data_options(slc_files: &[String]) -> Result<Vec<BurstSubsetO
     Ok(options)
 }
 
+/// Computes all ranked valid subsets from a list of OPERA CSLC filenames or URLs, populating
+/// each option's matching `inputs`.
+pub fn get_missing_data_options(slc_files: &[String]) -> Result<Vec<BurstSubsetOption>> {
+    get_missing_data_options_limited(slc_files, None)
+}
+
 /// Computes ranked valid subsets from explicit `(burst_id, date)` pairs.
 pub fn get_missing_data_options_from_pairs(
     pairs: &[(String, CalendarDate)],
@@ -276,9 +321,7 @@ pub fn get_missing_data_options_from_pairs(
     }
     let burst_map = burst_id_mapping_from_pairs(pairs)?;
     let (burst_ids, dates, incidence) = get_burst_id_date_incidence(&burst_map);
-    Ok(generate_burst_subset_options(
-        &incidence, &burst_ids, &dates,
-    ))
+    generate_burst_subset_options(&incidence, &burst_ids, &dates)
 }
 
 #[cfg(test)]
@@ -354,6 +397,20 @@ mod tests {
                 .inputs
                 .iter()
                 .all(|f| !f.contains("20230201T161649Z"))
+        );
+
+        // Malformed acquisition date (Feb 30) must error instead of substituting generation date.
+        let bad = vec![
+            "OPERA_L2_CSLC-S1_T087-185683-IW1_20230230T161649Z_20230301T185235Z_S1A_VV_v1.1.h5"
+                .into(),
+        ];
+        assert!(get_missing_data_options(&bad).is_err());
+
+        // Mismatched incidence dimensions must return Err instead of panicking.
+        let d = CalendarDate::new(2023, 1, 1).unwrap();
+        assert!(generate_burst_subset_options(&[vec![true]], &[], &[d]).is_err());
+        assert!(
+            generate_burst_subset_options(&[vec![]], &["t087_185683_iw1".into()], &[d]).is_err()
         );
     }
 }

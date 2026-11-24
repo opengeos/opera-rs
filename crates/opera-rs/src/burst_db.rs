@@ -301,7 +301,7 @@ pub fn fetch_burst_db_file(asset: BurstDbAsset, cache_dir: Option<&Path>) -> Res
     Ok(target)
 }
 
-/// Stub when the `http` feature is disabled.
+/// Stub when the `http` feature is disabled (verifies SHA-256 of cached release archives).
 #[cfg(not(feature = "http"))]
 pub fn fetch_burst_db_file(asset: BurstDbAsset, cache_dir: Option<&Path>) -> Result<PathBuf> {
     let dir = cache_dir
@@ -309,7 +309,17 @@ pub fn fetch_burst_db_file(asset: BurstDbAsset, cache_dir: Option<&Path>) -> Res
         .unwrap_or_else(default_cache_dir);
     let target = dir.join(asset.filename());
     if target.is_file() {
-        return Ok(target);
+        let existing = std::fs::read(&target)?;
+        let got = sha256_hex(&existing);
+        if got == asset.sha256() {
+            return Ok(target);
+        }
+        return Err(OperaError::InvalidInput(format!(
+            "cached burst_db asset {} failed SHA-256 verification (expected {}, got {})",
+            asset.filename(),
+            asset.sha256(),
+            got
+        )));
     }
     Err(OperaError::HttpDisabled)
 }
@@ -379,11 +389,13 @@ pub fn get_frame_to_burst_mapping(frame_id: u32, json_file: Option<&Path>) -> Re
         .and_then(|d| d.get(&key))
         .ok_or_else(|| OperaError::NoResults(format!("DISP-S1 frame {frame_id} not found")))?;
 
-    let epsg = entry
+    let epsg_u64 = entry
         .get("epsg")
         .and_then(Value::as_u64)
-        .ok_or_else(|| OperaError::InvalidInput(format!("frame {frame_id} missing epsg")))?
-        as u32;
+        .ok_or_else(|| OperaError::InvalidInput(format!("frame {frame_id} missing epsg")))?;
+    let epsg = u32::try_from(epsg_u64).map_err(|_| {
+        OperaError::InvalidInput(format!("frame {frame_id} epsg {epsg_u64} out of u32 range"))
+    })?;
     let is_land = value_as_bool(entry.get("is_land")).unwrap_or(false);
     let is_north_america = value_as_bool(entry.get("is_north_america")).unwrap_or(false);
     let xmin = entry
@@ -445,14 +457,20 @@ pub fn get_frame_ids_for_burst(burst_id: &str, json_file: Option<&Path>) -> Resu
         .get("data")
         .and_then(|d| d.get(&norm))
         .ok_or_else(|| OperaError::NoResults(format!("burst ID '{norm}' not found in burst_db")))?;
-    let ids: Vec<u32> = entry
+    let arr = entry
         .get("frame_ids")
         .and_then(Value::as_array)
-        .ok_or_else(|| OperaError::InvalidInput(format!("burst '{norm}' missing frame_ids")))?
-        .iter()
-        .filter_map(Value::as_u64)
-        .map(|n| n as u32)
-        .collect();
+        .ok_or_else(|| OperaError::InvalidInput(format!("burst '{norm}' missing frame_ids")))?;
+    let mut ids = Vec::with_capacity(arr.len());
+    for v in arr {
+        let n = v.as_u64().ok_or_else(|| {
+            OperaError::InvalidInput(format!("burst '{norm}' contains non-integer frame_id {v}"))
+        })?;
+        let id = u32::try_from(n).map_err(|_| {
+            OperaError::InvalidInput(format!("burst '{norm}' frame_id {n} exceeds u32 range"))
+        })?;
+        ids.push(id);
+    }
     Ok(ids)
 }
 
@@ -480,22 +498,19 @@ pub fn get_frame_bbox(frame_id: u32, latlon: bool, json_file: Option<&Path>) -> 
 pub fn get_frame_geojson(frame_ids: Option<&[u32]>, json_file: Option<&Path>) -> Result<Value> {
     let path = resolve_asset_path(BurstDbAsset::FrameGeometries, json_file)?;
     let mut fc = read_zipped_json(&path)?;
-    if let Some(ids) = frame_ids {
-        let want: BTreeSet<u32> = ids.iter().copied().collect();
-        let filtered: Vec<Value> = fc
-            .get("features")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|f| {
-                feature_frame_id(f)
-                    .map(|id| want.contains(&id))
-                    .unwrap_or(false)
-            })
-            .collect();
-        if let Some(obj) = fc.as_object_mut() {
-            obj.insert("features".into(), Value::Array(filtered));
+    if let Some(features) = fc.get_mut("features").and_then(Value::as_array_mut) {
+        if let Some(ids) = frame_ids {
+            let want: BTreeSet<u32> = ids.iter().copied().collect();
+            features.retain(|f| feature_frame_id(f).is_some_and(|id| want.contains(&id)));
+        }
+        // Mirror top-level feature `id` into `properties.frame_id` so vector writers
+        // (GeoPackage / Shapefile) preserve the DISP frame identifier as an attribute column.
+        for feat in features.iter_mut() {
+            if let Some(fid) = feature_frame_id(feat)
+                && let Some(props) = feat.get_mut("properties").and_then(Value::as_object_mut)
+            {
+                props.entry("frame_id").or_insert_with(|| json!(fid));
+            }
         }
     }
     Ok(fc)
@@ -510,22 +525,13 @@ pub fn get_burst_id_geojson(
     let mut fc = read_zipped_json(&path)?;
     if let Some(ids) = burst_ids {
         let want: BTreeSet<String> = ids.iter().map(|b| normalize_burst_id(b)).collect();
-        let filtered: Vec<Value> = fc
-            .get("features")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|f| {
+        if let Some(features) = fc.get_mut("features").and_then(Value::as_array_mut) {
+            features.retain(|f| {
                 f.get("properties")
                     .and_then(|p| p.get("burst_id_jpl"))
                     .and_then(Value::as_str)
-                    .map(|b| want.contains(&normalize_burst_id(b)))
-                    .unwrap_or(false)
-            })
-            .collect();
-        if let Some(obj) = fc.as_object_mut() {
-            obj.insert("features".into(), Value::Array(filtered));
+                    .is_some_and(|b| want.contains(&normalize_burst_id(b)))
+            });
         }
     }
     Ok(fc)
@@ -628,7 +634,7 @@ pub fn frame_ids_from_geojson(fc: &Value) -> Vec<u32> {
 
 fn feature_frame_id(feat: &Value) -> Option<u32> {
     if let Some(n) = feat.get("id").and_then(Value::as_u64) {
-        return Some(n as u32);
+        return u32::try_from(n).ok();
     }
     if let Some(s) = feat.get("id").and_then(Value::as_str)
         && let Ok(n) = s.parse::<u32>()
@@ -638,7 +644,7 @@ fn feature_frame_id(feat: &Value) -> Option<u32> {
     feat.get("properties")
         .and_then(|p| p.get("frame_id"))
         .and_then(Value::as_u64)
-        .map(|n| n as u32)
+        .and_then(|n| u32::try_from(n).ok())
 }
 
 fn value_as_bool(v: Option<&Value>) -> Option<bool> {
@@ -661,7 +667,9 @@ fn geojson_geometry_contains_point(geom: &Value, pt: [f64; 2]) -> bool {
     };
     let contains_poly = |rings: &[Vec<[f64; 2]>]| -> bool {
         (point_in_ring(pt, &rings[0]) || point_on_ring_boundary(pt, &rings[0]))
-            && !rings[1..].iter().any(|h| point_in_ring(pt, h))
+            && !rings[1..]
+                .iter()
+                .any(|h| point_in_ring(pt, h) && !point_on_ring_boundary(pt, h))
     };
     match gtype {
         "Polygon" => parse_polygon_rings(coords)
@@ -752,15 +760,15 @@ fn polygon_intersects_bbox(rings: &[Vec<[f64; 2]>], bbox: BBox) -> bool {
         return false;
     }
 
-    // 2. Any exterior vertex inside bbox -> intersects.
-    if exterior
-        .iter()
-        .any(|&[x, y]| x >= bbox.west && x <= bbox.east && y >= bbox.south && y <= bbox.north)
-    {
+    // 2. Any ring vertex (exterior or interior hole boundary) inside bbox -> intersects.
+    if rings.iter().any(|ring| {
+        ring.iter()
+            .any(|&[x, y]| x >= bbox.west && x <= bbox.east && y >= bbox.south && y <= bbox.north)
+    }) {
         return true;
     }
 
-    // 3. Any bbox corner inside the polygon (inside exterior and not inside any hole) -> intersects.
+    // 3. Any bbox corner inside the polygon (inside/on exterior and not strictly inside any hole) -> intersects.
     let corners = [
         [bbox.west, bbox.south],
         [bbox.east, bbox.south],
@@ -768,22 +776,28 @@ fn polygon_intersects_bbox(rings: &[Vec<[f64; 2]>], bbox: BBox) -> bool {
         [bbox.west, bbox.north],
     ];
     for c in corners {
-        if point_in_ring(c, exterior) && !rings[1..].iter().any(|h| point_in_ring(c, h)) {
+        if (point_in_ring(c, exterior) || point_on_ring_boundary(c, exterior))
+            && !rings[1..]
+                .iter()
+                .any(|h| point_in_ring(c, h) && !point_on_ring_boundary(c, h))
+        {
             return true;
         }
     }
 
-    // 4. Any exterior edge intersects any bbox edge -> intersects.
+    // 4. Any polygon ring edge (exterior or interior hole boundary) intersects any bbox edge -> intersects.
     let bbox_edges = [
         ([bbox.west, bbox.south], [bbox.east, bbox.south]),
         ([bbox.east, bbox.south], [bbox.east, bbox.north]),
         ([bbox.east, bbox.north], [bbox.west, bbox.north]),
         ([bbox.west, bbox.north], [bbox.west, bbox.south]),
     ];
-    for w in exterior.windows(2) {
-        for &(b0, b1) in &bbox_edges {
-            if segments_intersect(w[0], w[1], b0, b1) {
-                return true;
+    for ring in rings {
+        for w in ring.windows(2) {
+            for &(b0, b1) in &bbox_edges {
+                if segments_intersect(w[0], w[1], b0, b1) {
+                    return true;
+                }
             }
         }
     }
@@ -852,58 +866,111 @@ fn read_u32_le(buf: &[u8], off: usize) -> Option<u32> {
     Some(u32::from_le_bytes(buf.get(off..off + 4)?.try_into().ok()?))
 }
 
-/// Extracts the first non-directory entry from a standard ZIP archive using Central Directory
-/// metadata (so entries with data descriptors are handled accurately).
+/// Maximum decompressed JSON/GeoJSON payload size allowed from a ZIP archive (512 MiB;
+/// covers the ~260 MiB `burst-id-geometries-simple-0.9.0.geojson` while blocking zip bombs).
+const MAX_ZIP_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Extracts the first `.json` or `.geojson` entry from a standard ZIP archive using Central
+/// Directory metadata, validating EOCD bounds, CRC-32 checksum, and decompressed size limit.
 pub(crate) fn extract_first_zip_entry(zip_bytes: &[u8]) -> Result<Vec<u8>> {
     if zip_bytes.len() < 22 {
         return Err(OperaError::InvalidInput("truncated ZIP archive".into()));
     }
-    // Locate End of Central Directory (EOCD) signature `PK\x05\x06` scanning backwards.
+    // Locate a validated End of Central Directory (EOCD) record `PK\x05\x06` scanning backwards.
     let search_start = zip_bytes.len().saturating_sub(65_557);
-    let mut eocd_off = None;
+    let mut eocd_found = None;
     for pos in (search_start..=zip_bytes.len() - 22).rev() {
-        if &zip_bytes[pos..pos + 4] == b"PK\x05\x06" {
-            eocd_off = Some(pos);
-            break;
+        if &zip_bytes[pos..pos + 4] != b"PK\x05\x06" {
+            continue;
         }
+        let Some(cd_entries) = read_u16_le(zip_bytes, pos + 10) else {
+            continue;
+        };
+        let Some(cd_size) = read_u32_le(zip_bytes, pos + 12).map(|v| v as usize) else {
+            continue;
+        };
+        let Some(cd_offset) = read_u32_le(zip_bytes, pos + 16).map(|v| v as usize) else {
+            continue;
+        };
+        let Some(comment_len) = read_u16_le(zip_bytes, pos + 20).map(|v| v as usize) else {
+            continue;
+        };
+        if pos.checked_add(22).and_then(|v| v.checked_add(comment_len)) != Some(zip_bytes.len()) {
+            continue;
+        }
+        if cd_offset.checked_add(cd_size).is_none_or(|end| end > pos) {
+            continue;
+        }
+        if cd_entries > 0 && zip_bytes.get(cd_offset..cd_offset + 4) != Some(b"PK\x01\x02") {
+            continue;
+        }
+        eocd_found = Some((cd_entries, cd_offset, cd_offset + cd_size));
+        break;
     }
-    let eocd = eocd_off.ok_or_else(|| {
-        OperaError::InvalidInput("invalid ZIP archive: missing EOCD record".into())
+    let (cd_entries, mut pos, cd_end) = eocd_found.ok_or_else(|| {
+        OperaError::InvalidInput("invalid ZIP archive: missing valid EOCD record".into())
     })?;
-    let cd_entries = read_u16_le(zip_bytes, eocd + 10)
-        .ok_or_else(|| OperaError::InvalidInput("truncated ZIP EOCD".into()))?;
-    let cd_offset = read_u32_le(zip_bytes, eocd + 16)
-        .ok_or_else(|| OperaError::InvalidInput("truncated ZIP EOCD".into()))?
-        as usize;
 
-    let mut pos = cd_offset;
     for _ in 0..cd_entries {
-        if zip_bytes.get(pos..pos + 4) != Some(b"PK\x01\x02") {
+        if pos + 46 > cd_end || zip_bytes.get(pos..pos + 4) != Some(b"PK\x01\x02") {
             return Err(OperaError::InvalidInput(
-                "invalid ZIP central directory entry".into(),
+                "invalid or truncated ZIP central directory entry".into(),
             ));
         }
-        let method = read_u16_le(zip_bytes, pos + 10).unwrap_or(0);
-        let comp_size = read_u32_le(zip_bytes, pos + 20).unwrap_or(0) as usize;
-        let name_len = read_u16_le(zip_bytes, pos + 28).unwrap_or(0) as usize;
-        let extra_len = read_u16_le(zip_bytes, pos + 30).unwrap_or(0) as usize;
-        let comment_len = read_u16_le(zip_bytes, pos + 32).unwrap_or(0) as usize;
-        let local_hdr_off = read_u32_le(zip_bytes, pos + 42).unwrap_or(0) as usize;
+        let method = read_u16_le(zip_bytes, pos + 10)
+            .ok_or_else(|| OperaError::InvalidInput("truncated ZIP central directory".into()))?;
+        let expected_crc = read_u32_le(zip_bytes, pos + 16)
+            .ok_or_else(|| OperaError::InvalidInput("truncated ZIP central directory".into()))?;
+        let comp_size = read_u32_le(zip_bytes, pos + 20)
+            .ok_or_else(|| OperaError::InvalidInput("truncated ZIP central directory".into()))?
+            as usize;
+        let name_len = read_u16_le(zip_bytes, pos + 28)
+            .ok_or_else(|| OperaError::InvalidInput("truncated ZIP central directory".into()))?
+            as usize;
+        let extra_len = read_u16_le(zip_bytes, pos + 30)
+            .ok_or_else(|| OperaError::InvalidInput("truncated ZIP central directory".into()))?
+            as usize;
+        let comment_len = read_u16_le(zip_bytes, pos + 32)
+            .ok_or_else(|| OperaError::InvalidInput("truncated ZIP central directory".into()))?
+            as usize;
+        let local_hdr_off = read_u32_le(zip_bytes, pos + 42)
+            .ok_or_else(|| OperaError::InvalidInput("truncated ZIP central directory".into()))?
+            as usize;
+        let name_end = pos
+            .checked_add(46)
+            .and_then(|v| v.checked_add(name_len))
+            .ok_or_else(|| OperaError::InvalidInput("ZIP entry name overflow".into()))?;
         let name_bytes = zip_bytes
-            .get(pos + 46..pos + 46 + name_len)
+            .get(pos + 46..name_end)
             .ok_or_else(|| OperaError::InvalidInput("truncated ZIP entry name".into()))?;
-        pos += 46 + name_len + extra_len + comment_len;
+        pos = name_end
+            .checked_add(extra_len)
+            .and_then(|v| v.checked_add(comment_len))
+            .ok_or_else(|| OperaError::InvalidInput("ZIP central directory overflow".into()))?;
 
         if name_bytes.ends_with(b"/") {
+            continue;
+        }
+        let entry_name = std::str::from_utf8(name_bytes).unwrap_or("");
+        let lower_name = entry_name.to_ascii_lowercase();
+        if !lower_name.ends_with(".json") && !lower_name.ends_with(".geojson") {
             continue;
         }
 
         if zip_bytes.get(local_hdr_off..local_hdr_off + 4) != Some(b"PK\x03\x04") {
             return Err(OperaError::InvalidInput("invalid ZIP local header".into()));
         }
-        let lh_name_len = read_u16_le(zip_bytes, local_hdr_off + 26).unwrap_or(0) as usize;
-        let lh_extra_len = read_u16_le(zip_bytes, local_hdr_off + 28).unwrap_or(0) as usize;
-        let data_start = local_hdr_off + 30 + lh_name_len + lh_extra_len;
+        let lh_name_len = read_u16_le(zip_bytes, local_hdr_off + 26)
+            .ok_or_else(|| OperaError::InvalidInput("truncated ZIP local header".into()))?
+            as usize;
+        let lh_extra_len = read_u16_le(zip_bytes, local_hdr_off + 28)
+            .ok_or_else(|| OperaError::InvalidInput("truncated ZIP local header".into()))?
+            as usize;
+        let data_start = local_hdr_off
+            .checked_add(30)
+            .and_then(|v| v.checked_add(lh_name_len))
+            .and_then(|v| v.checked_add(lh_extra_len))
+            .ok_or_else(|| OperaError::InvalidInput("ZIP local header offset overflow".into()))?;
         let data_end = data_start
             .checked_add(comp_size)
             .ok_or_else(|| OperaError::InvalidInput("ZIP entry size overflow".into()))?;
@@ -911,22 +978,49 @@ pub(crate) fn extract_first_zip_entry(zip_bytes: &[u8]) -> Result<Vec<u8>> {
             .get(data_start..data_end)
             .ok_or_else(|| OperaError::InvalidInput("truncated ZIP entry payload".into()))?;
 
-        return match method {
-            0 => Ok(comp.to_vec()),
+        let out = match method {
+            0 => {
+                if comp.len() as u64 > MAX_ZIP_DECOMPRESSED_BYTES {
+                    return Err(OperaError::InvalidInput(
+                        "ZIP entry exceeds maximum allowed size".into(),
+                    ));
+                }
+                comp.to_vec()
+            }
             8 => {
                 let mut decoder = DeflateDecoder::new(comp);
-                let mut out = Vec::new();
-                decoder.read_to_end(&mut out)?;
-                Ok(out)
+                let mut buf = Vec::new();
+                decoder
+                    .by_ref()
+                    .take(MAX_ZIP_DECOMPRESSED_BYTES + 1)
+                    .read_to_end(&mut buf)?;
+                if buf.len() as u64 > MAX_ZIP_DECOMPRESSED_BYTES {
+                    return Err(OperaError::InvalidInput(
+                        "decompressed ZIP entry exceeds maximum allowed size".into(),
+                    ));
+                }
+                buf
             }
-            other => Err(OperaError::InvalidInput(format!(
-                "unsupported ZIP compression method {other}"
-            ))),
+            other => {
+                return Err(OperaError::InvalidInput(format!(
+                    "unsupported ZIP compression method {other}"
+                )));
+            }
         };
+
+        let mut crc = flate2::Crc::new();
+        crc.update(&out);
+        let actual_crc = crc.sum();
+        if actual_crc != expected_crc {
+            return Err(OperaError::InvalidInput(format!(
+                "ZIP CRC-32 mismatch for '{entry_name}': expected {expected_crc:#010x}, got {actual_crc:#010x}"
+            )));
+        }
+        return Ok(out);
     }
 
     Err(OperaError::InvalidInput(
-        "ZIP archive contains no file entries".into(),
+        "ZIP archive contains no .json or .geojson entries".into(),
     ))
 }
 
@@ -934,7 +1028,6 @@ pub(crate) fn extract_first_zip_entry(zip_bytes: &[u8]) -> Result<Vec<u8>> {
 // Minimal pure-Rust FIPS 180-4 SHA-256 (zero external dependencies)
 // ---------------------------------------------------------------------------
 
-#[cfg_attr(not(feature = "http"), allow(dead_code))]
 pub(crate) fn sha256_hex(data: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -1024,6 +1117,9 @@ mod tests {
     use std::io::Write;
 
     fn make_single_file_zip(name: &str, payload: &[u8]) -> Vec<u8> {
+        let mut crc = flate2::Crc::new();
+        crc.update(payload);
+        let crc_val = crc.sum();
         let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(payload).unwrap();
         let comp = encoder.finish().unwrap();
@@ -1037,7 +1133,7 @@ mod tests {
         zip.extend_from_slice(&8u16.to_le_bytes()); // deflate
         zip.extend_from_slice(&0u16.to_le_bytes()); // mod time
         zip.extend_from_slice(&0u16.to_le_bytes()); // mod date
-        zip.extend_from_slice(&0u32.to_le_bytes()); // crc (unused by our reader)
+        zip.extend_from_slice(&crc_val.to_le_bytes());
         zip.extend_from_slice(&(comp.len() as u32).to_le_bytes());
         zip.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
@@ -1054,7 +1150,7 @@ mod tests {
         zip.extend_from_slice(&8u16.to_le_bytes());
         zip.extend_from_slice(&0u16.to_le_bytes());
         zip.extend_from_slice(&0u16.to_le_bytes());
-        zip.extend_from_slice(&0u32.to_le_bytes());
+        zip.extend_from_slice(&crc_val.to_le_bytes());
         zip.extend_from_slice(&(comp.len() as u32).to_le_bytes());
         zip.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         zip.extend_from_slice(&(name.len() as u16).to_le_bytes());

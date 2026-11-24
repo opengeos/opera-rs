@@ -213,7 +213,7 @@ impl DispProduct {
             .parse()
             .map_err(|_| OperaError::InvalidInput(format!("invalid DISP frame id in '{input}'")))?;
         let polarization = match parts[5] {
-            "VV" | "HH" => parts[5].to_string(),
+            "VV" | "HH" | "VH" | "HV" => parts[5].to_string(),
             other => {
                 return Err(OperaError::InvalidInput(format!(
                     "unexpected DISP polarization '{other}' in '{input}'"
@@ -228,7 +228,11 @@ impl DispProduct {
         })?;
         let version = parts[8]
             .strip_prefix('v')
-            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
+            .filter(|v| {
+                !v.is_empty()
+                    && v.split('.')
+                        .all(|comp| !comp.is_empty() && comp.parse::<u32>().is_ok())
+            })
             .ok_or_else(|| {
                 OperaError::InvalidInput(format!("invalid DISP version token in '{input}'"))
             })?
@@ -255,9 +259,9 @@ impl DispProduct {
 
     /// Constructs a [`DispProduct`] from a CMR UMM-G `umm` JSON object.
     pub fn from_umm(umm: &Value, url_type: UrlType) -> Result<Self> {
-        let mut https_url: Option<String> = None;
-        let mut https_fallback: Option<String> = None;
-        let mut s3_url: Option<String> = None;
+        let mut https_primary: Vec<String> = Vec::new();
+        let mut https_fallback: Vec<String> = Vec::new();
+        let mut s3_urls: Vec<String> = Vec::new();
 
         if let Some(urls) = umm.get("RelatedUrls").and_then(Value::as_array) {
             for entry in urls {
@@ -266,35 +270,51 @@ impl DispProduct {
                     None => continue,
                 };
                 let rtype = entry.get("Type").and_then(Value::as_str).unwrap_or("");
-                if !u.ends_with(".nc") && !u.ends_with(".h5") {
+                let base = basename_for_parsing(u);
+                if !base.ends_with(".nc") && !base.ends_with(".h5") {
                     continue;
                 }
-                if u.starts_with("s3://") && s3_url.is_none() {
-                    s3_url = Some(u.to_string());
+                if u.starts_with("s3://") {
+                    s3_urls.push(u.to_string());
                 } else if u.starts_with("https://") {
-                    if (rtype == "GET DATA" || rtype.is_empty()) && https_url.is_none() {
-                        https_url = Some(u.to_string());
-                    } else if https_fallback.is_none() {
-                        https_fallback = Some(u.to_string());
+                    if rtype == "GET DATA" || rtype.is_empty() {
+                        https_primary.push(u.to_string());
+                    } else {
+                        https_fallback.push(u.to_string());
                     }
                 }
             }
         }
-        let https_url = https_url.or(https_fallback);
+
+        let valid_https = https_primary
+            .iter()
+            .chain(https_fallback.iter())
+            .find(|u| Self::from_filename(u).is_ok())
+            .cloned();
+        let valid_s3 = s3_urls
+            .iter()
+            .find(|u| Self::from_filename(u).is_ok())
+            .cloned();
 
         let granule_ur = umm
             .get("GranuleUR")
             .and_then(Value::as_str)
             .map(ToString::to_string);
         let chosen = match url_type {
-            UrlType::Https => https_url.clone().or_else(|| s3_url.clone()).or(granule_ur),
-            UrlType::S3 => s3_url.clone().or_else(|| https_url.clone()).or(granule_ur),
+            UrlType::Https => valid_https
+                .clone()
+                .or_else(|| valid_s3.clone())
+                .or(granule_ur),
+            UrlType::S3 => valid_s3
+                .clone()
+                .or_else(|| valid_https.clone())
+                .or(granule_ur),
         }
         .ok_or_else(|| OperaError::InvalidInput("CMR DISP-S1 item missing download URL".into()))?;
 
         let mut prod = Self::from_filename(&chosen)?;
-        prod.https_url = https_url;
-        prod.s3_url = s3_url;
+        prod.https_url = valid_https;
+        prod.s3_url = valid_s3;
         prod.size_in_bytes = umm
             .get("DataGranule")
             .and_then(|dg| dg.get("ArchiveAndDistributionInformation"))
@@ -557,10 +577,11 @@ pub fn search_disp_products(params: &DispSearchParams) -> Result<DispSearchResul
     let agent: ureq::Agent = config.into();
 
     let mut parsed: Vec<DispProduct> = Vec::new();
+    let mut fetched_items: usize = 0;
     let mut total_hits: usize = 0;
     let mut search_after: Option<String> = None;
 
-    while parsed.len() < limit {
+    while fetched_items < limit {
         let mut req = agent.get(&url).header(
             "User-Agent",
             format!(
@@ -595,13 +616,16 @@ pub fn search_disp_products(params: &DispSearchParams) -> Result<DispSearchResul
         let items = body
             .get("items")
             .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+            .ok_or_else(|| OperaError::Http("CMR DISP-S1 response missing 'items' array".into()))?;
         if items.is_empty() {
             break;
         }
         let got_count = items.len();
-        for item in &items {
+        for item in items {
+            if fetched_items >= limit {
+                break;
+            }
+            fetched_items += 1;
             if let Some(umm) = item.get("umm")
                 && let Ok(prod) = DispProduct::from_umm(umm, params.url_type)
             {
@@ -618,9 +642,6 @@ pub fn search_disp_products(params: &DispSearchParams) -> Result<DispSearchResul
                     continue;
                 }
                 parsed.push(prod);
-                if parsed.len() >= limit {
-                    break;
-                }
             }
         }
         search_after = next_after;
@@ -731,5 +752,27 @@ mod tests {
 
         #[cfg(feature = "http")]
         assert!(search_disp_products(&DispSearchParams::default()).is_err());
+
+        // Accept VH polarization, reject malformed version components, and skip metadata.nc / keep query strings.
+        let vh = DispProduct::from_filename(
+            "OPERA_L3_DISP-S1_IW_F11116_VH_20160705T140755Z_20160729T140756Z_v1.0_20241219T231545Z.nc",
+        )
+        .unwrap();
+        assert_eq!(vh.polarization, "VH");
+        assert!(
+            DispProduct::from_filename(
+                "OPERA_L3_DISP-S1_IW_F11116_VV_20160705T140755Z_20160729T140756Z_v1..10_20241219T231545Z.nc"
+            )
+            .is_err()
+        );
+        let umm_query = json!({
+            "RelatedUrls": [
+                { "Type": "GET DATA", "URL": "https://example.org/metadata.nc" },
+                { "Type": "GET DATA", "URL": "https://datapool.asf.alaska.edu/OPERA_L3_DISP-S1_IW_F11115_VV_20160810T140735Z_20160903T140736Z_v1.0_20250318T223016Z.nc?download=1" }
+            ]
+        });
+        let p_q = DispProduct::from_umm(&umm_query, UrlType::Https).unwrap();
+        assert!(p_q.filename.ends_with("?download=1"));
+        assert_eq!(p_q.frame_id, 11115);
     }
 }

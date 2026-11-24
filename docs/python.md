@@ -35,7 +35,7 @@ To run all examples interactively without installing anything locally, open the 
 | `opera_rs.normalize_burst_id(burst_id)` | Normalize a Sentinel-1 burst ID (`"T087-185683-IW2"` -> `"t087_185683_iw2"`) |
 | `opera_rs.get_burst_id(filename)` | Extract normalized Sentinel-1 burst ID from a filename, UR, or URL |
 | `opera_rs.group_by_burst(files)` | Group CSLC filenames or URLs by normalized burst ID |
-| `opera_rs.get_dates(filename)` | Extract `YYYY-MM-DD` acquisition dates from a filename stem |
+| `opera_rs.get_dates(filename)` | Extract all `YYYY-MM-DD` dates from a filename stem |
 | `opera_rs.parse_disp_filename(filename)` | Parse an `OPERA_L3_DISP-S1` filename or URL into structured metadata |
 | `opera_rs.get_frame_to_burst_mapping(frame_id, ...)` | Look up DISP-S1 frame EPSG, UTM/WGS 84 bounds, and burst IDs (`burst_db` v0.9.0) |
 | `opera_rs.get_burst_ids_for_frame(frame_id, ...)` | Return normalized Sentinel-1 burst IDs belonging to a DISP-S1 frame |
