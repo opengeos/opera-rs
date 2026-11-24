@@ -74,10 +74,14 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
       <div class="op-map-card">
         <div class="op-map-toolbar">
           <span class="op-hint" id="op-map-hint">Click Search &amp; Render to load live NASA CMR footprints and titiler-cmr tiles. Click anywhere on the map to sample pixel values.</span>
-          <label class="op-inline-check">
-            Opacity
-            <input type="range" id="op-opacity" min="0" max="1" step="0.05" value="0.85">
-          </label>
+          <div class="op-btn-row">
+            <label class="op-inline-check"><input type="checkbox" id="op-show-satellite"> Satellite (Esri)</label>
+            <label class="op-inline-check"><input type="checkbox" id="op-show-footprints" checked> Footprints</label>
+            <label class="op-inline-check">
+              Opacity
+              <input type="range" id="op-opacity" min="0" max="1" step="0.05" value="0.85">
+            </label>
+          </div>
         </div>
         <div id="op-map" class="op-map"></div>
         <div class="op-legend" id="op-legend"></div>

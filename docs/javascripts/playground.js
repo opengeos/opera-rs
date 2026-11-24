@@ -305,8 +305,24 @@
             tileSize: 256,
             attribution: "&copy; OpenStreetMap contributors",
           },
+          esri_imagery: {
+            type: "raster",
+            tiles: [
+              "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            ],
+            tileSize: 256,
+            attribution: "Tiles &copy; Esri",
+          },
         },
-        layers: [{ id: "osm-base", type: "raster", source: "osm" }],
+        layers: [
+          { id: "osm-base", type: "raster", source: "osm" },
+          {
+            id: "esri-imagery-base",
+            type: "raster",
+            source: "esri_imagery",
+            layout: { visibility: "none" },
+          },
+        ],
       },
       center: [-119.7, 36.05],
       zoom: 9,
@@ -405,17 +421,20 @@
     }
 
     if (fc && fc.features && fc.features.length) {
+      const fpVis = $("op-show-footprints") && !$("op-show-footprints").checked ? "none" : "visible";
       map.addSource("opera-footprints", { type: "geojson", data: fc });
       map.addLayer({
         id: "opera-footprints-fill",
         type: "fill",
         source: "opera-footprints",
+        layout: { visibility: fpVis },
         paint: { "fill-color": "#0d9488", "fill-opacity": 0.05 },
       });
       map.addLayer({
         id: "opera-footprints-line",
         type: "line",
         source: "opera-footprints",
+        layout: { visibility: fpVis },
         paint: { "line-color": "#0d9488", "line-width": 1.6 },
       });
     }
@@ -1143,6 +1162,26 @@
       updateLegend();
       updateEquivalentCommands();
       if (lastSearch && lastSearch.concept_id) applyTileLayerFromState();
+    });
+    $("op-show-satellite").addEventListener("change", (e) => {
+      if (map && map.getLayer("esri-imagery-base")) {
+        map.setLayoutProperty(
+          "esri-imagery-base",
+          "visibility",
+          e.target.checked ? "visible" : "none"
+        );
+      }
+    });
+    $("op-show-footprints").addEventListener("change", (e) => {
+      const vis = e.target.checked ? "visible" : "none";
+      if (map) {
+        if (map.getLayer("opera-footprints-fill")) {
+          map.setLayoutProperty("opera-footprints-fill", "visibility", vis);
+        }
+        if (map.getLayer("opera-footprints-line")) {
+          map.setLayoutProperty("opera-footprints-line", "visibility", vis);
+        }
+      }
     });
     $("op-opacity").addEventListener("input", () => {
       if (map && map.getLayer("opera-tiles-layer")) {
