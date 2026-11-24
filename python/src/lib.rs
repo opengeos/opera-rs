@@ -7,10 +7,17 @@ use opera_rs::OperaError;
 use opera_rs::analysis::{
     ChangeDetectionOptions, TimeSeriesOptions, analyze_time_series, detect_change,
 };
+use opera_rs::burst_db::{
+    get_burst_id_geojson, get_burst_ids_for_frame, get_frame_bbox, get_frame_geojson,
+    get_frame_ids_for_burst, get_frame_to_burst_mapping, get_intersecting_frames,
+};
+use opera_rs::bursts::{get_burst_id, get_dates, group_by_burst, normalize_burst_id};
 use opera_rs::cmr::{CmrSearchParams, resolve_aoi_layer, resolve_concept_id, search_granules};
+use opera_rs::disp::{DispProduct, DispSearchParams, UrlType, search_disp_products};
 use opera_rs::flood_extent::{FloodExtentOptions, derive_flood_extent};
 use opera_rs::geo_io::{inspect_local_raster, read_aoi_bbox, write_feature_collection};
 use opera_rs::geocode::geocode_place;
+use opera_rs::missing_data::get_missing_data_options;
 use opera_rs::products::{
     LayerStyle, catalog, expression_presets, find_product, should_use_categorical,
 };
@@ -544,6 +551,195 @@ fn inspect_raster_json(
     to_json_string(&res)
 }
 
+#[pyfunction]
+fn normalize_burst_id_py(burst_id: &str) -> String {
+    normalize_burst_id(burst_id)
+}
+
+#[pyfunction]
+fn get_burst_id_py(filename: &str) -> PyResult<String> {
+    get_burst_id(filename).map_err(to_py_err)
+}
+
+#[pyfunction]
+fn group_by_burst_json(files: Vec<String>) -> PyResult<String> {
+    let grouped = group_by_burst(&files).map_err(to_py_err)?;
+    to_json_string(&grouped)
+}
+
+#[pyfunction]
+fn get_dates_py(filename: &str) -> Vec<String> {
+    get_dates(filename)
+        .into_iter()
+        .map(|d| d.to_string())
+        .collect()
+}
+
+#[pyfunction]
+fn parse_disp_filename_json(filename: &str) -> PyResult<String> {
+    let parsed = DispProduct::from_filename(filename).map_err(to_py_err)?;
+    to_json_string(&parsed)
+}
+
+#[pyfunction]
+#[pyo3(signature = (frame_id, json_file=None))]
+fn frame_to_burst_mapping_json(
+    py: Python<'_>,
+    frame_id: u32,
+    json_file: Option<String>,
+) -> PyResult<String> {
+    let info = py
+        .detach(|| {
+            get_frame_to_burst_mapping(frame_id, json_file.as_deref().map(PathBuf::from).as_deref())
+        })
+        .map_err(to_py_err)?;
+    to_json_string(&info)
+}
+
+#[pyfunction]
+#[pyo3(signature = (frame_id, json_file=None))]
+fn burst_ids_for_frame_py(
+    py: Python<'_>,
+    frame_id: u32,
+    json_file: Option<String>,
+) -> PyResult<Vec<String>> {
+    py.detach(|| {
+        get_burst_ids_for_frame(frame_id, json_file.as_deref().map(PathBuf::from).as_deref())
+    })
+    .map_err(to_py_err)
+}
+
+#[pyfunction]
+#[pyo3(signature = (burst_id, json_file=None))]
+fn frame_ids_for_burst_py(
+    py: Python<'_>,
+    burst_id: &str,
+    json_file: Option<String>,
+) -> PyResult<Vec<u32>> {
+    let burst_id = burst_id.to_string();
+    py.detach(|| {
+        get_frame_ids_for_burst(
+            &burst_id,
+            json_file.as_deref().map(PathBuf::from).as_deref(),
+        )
+    })
+    .map_err(to_py_err)
+}
+
+#[pyfunction]
+#[pyo3(signature = (frame_id, latlon=false, json_file=None))]
+fn frame_bbox_json(
+    py: Python<'_>,
+    frame_id: u32,
+    latlon: bool,
+    json_file: Option<String>,
+) -> PyResult<String> {
+    let fb = py
+        .detach(|| {
+            get_frame_bbox(
+                frame_id,
+                latlon,
+                json_file.as_deref().map(PathBuf::from).as_deref(),
+            )
+        })
+        .map_err(to_py_err)?;
+    to_json_string(&fb)
+}
+
+#[pyfunction]
+#[pyo3(signature = (frame_ids=None, json_file=None))]
+fn frame_geojson_json(
+    py: Python<'_>,
+    frame_ids: Option<Vec<u32>>,
+    json_file: Option<String>,
+) -> PyResult<String> {
+    let fc = py
+        .detach(|| {
+            get_frame_geojson(
+                frame_ids.as_deref(),
+                json_file.as_deref().map(PathBuf::from).as_deref(),
+            )
+        })
+        .map_err(to_py_err)?;
+    to_json_string(&fc)
+}
+
+#[pyfunction]
+#[pyo3(signature = (burst_ids=None, json_file=None))]
+fn burst_id_geojson_json(
+    py: Python<'_>,
+    burst_ids: Option<Vec<String>>,
+    json_file: Option<String>,
+) -> PyResult<String> {
+    let fc = py
+        .detach(|| {
+            get_burst_id_geojson(
+                burst_ids.as_deref(),
+                json_file.as_deref().map(PathBuf::from).as_deref(),
+            )
+        })
+        .map_err(to_py_err)?;
+    to_json_string(&fc)
+}
+
+#[pyfunction]
+#[pyo3(signature = (bbox, json_file=None))]
+fn intersecting_frames_json(
+    py: Python<'_>,
+    bbox: [f64; 4],
+    json_file: Option<String>,
+) -> PyResult<String> {
+    let parsed_bbox = BBox::from_array(bbox).map_err(to_py_err)?;
+    let fc = py
+        .detach(|| {
+            get_intersecting_frames(
+                parsed_bbox,
+                json_file.as_deref().map(PathBuf::from).as_deref(),
+            )
+        })
+        .map_err(to_py_err)?;
+    to_json_string(&fc)
+}
+
+#[pyfunction]
+fn missing_data_options_json(slc_files: Vec<String>) -> PyResult<String> {
+    let opts = get_missing_data_options(&slc_files).map_err(to_py_err)?;
+    to_json_string(&opts)
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (frame_id=None, bbox=None, product_version=Some("1.0".to_string()), start=None, end=None, url_type="https", deduplicate=true, limit=500, cmr_endpoint=None))]
+fn disp_search_json(
+    py: Python<'_>,
+    frame_id: Option<u32>,
+    bbox: Option<[f64; 4]>,
+    product_version: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    url_type: &str,
+    deduplicate: bool,
+    limit: usize,
+    cmr_endpoint: Option<String>,
+) -> PyResult<String> {
+    let parsed_url_type: UrlType = url_type.parse().map_err(to_py_err)?;
+    let params = DispSearchParams {
+        frame_id,
+        bbox: parse_bbox_opt(bbox)?,
+        product_version,
+        start,
+        end,
+        url_type: parsed_url_type,
+        deduplicate,
+        limit,
+        cmr_endpoint,
+    };
+    let res = py
+        .detach(|| search_disp_products(&params))
+        .map_err(to_py_err)?;
+    to_json_string(&res)
+}
+
 #[pymodule]
 fn _opera_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", opera_rs::VERSION)?;
@@ -565,5 +761,19 @@ fn _opera_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_aoi_bbox_py, m)?)?;
     m.add_function(wrap_pyfunction!(write_vector_py, m)?)?;
     m.add_function(wrap_pyfunction!(inspect_raster_json, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_burst_id_py, m)?)?;
+    m.add_function(wrap_pyfunction!(get_burst_id_py, m)?)?;
+    m.add_function(wrap_pyfunction!(group_by_burst_json, m)?)?;
+    m.add_function(wrap_pyfunction!(get_dates_py, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_disp_filename_json, m)?)?;
+    m.add_function(wrap_pyfunction!(frame_to_burst_mapping_json, m)?)?;
+    m.add_function(wrap_pyfunction!(burst_ids_for_frame_py, m)?)?;
+    m.add_function(wrap_pyfunction!(frame_ids_for_burst_py, m)?)?;
+    m.add_function(wrap_pyfunction!(frame_bbox_json, m)?)?;
+    m.add_function(wrap_pyfunction!(frame_geojson_json, m)?)?;
+    m.add_function(wrap_pyfunction!(burst_id_geojson_json, m)?)?;
+    m.add_function(wrap_pyfunction!(intersecting_frames_json, m)?)?;
+    m.add_function(wrap_pyfunction!(missing_data_options_json, m)?)?;
+    m.add_function(wrap_pyfunction!(disp_search_json, m)?)?;
     Ok(())
 }

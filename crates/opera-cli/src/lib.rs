@@ -11,10 +11,18 @@ use opera_rs::analysis::{
     ChangeDetectionOptions, TimeSeriesOptions, analyze_time_series, detect_change,
     fetch_time_series_candidates,
 };
+use opera_rs::burst_db::{
+    FrameBBox, OrbitPass, frame_ids_from_geojson, get_frame_bbox, get_frame_geojson,
+    get_frame_ids_for_burst, get_frame_orbit_pass, get_frame_to_burst_mapping,
+    get_intersecting_frames, get_intersecting_frames_for_point, reproject_bbox_to_wgs84,
+};
+use opera_rs::bursts::{get_dates, group_by_burst, parse_burst_id};
 use opera_rs::cmr::{CmrSearchParams, resolve_aoi_layer, resolve_concept_id, search_granules};
+use opera_rs::disp::{DispSearchParams, UrlType, search_disp_products};
 use opera_rs::flood_extent::{FloodExtentOptions, derive_flood_extent};
 use opera_rs::geo_io::{inspect_local_raster, read_aoi_bbox, write_feature_collection};
 use opera_rs::geocode::geocode_place;
+use opera_rs::missing_data::get_missing_data_options_limited;
 use opera_rs::products::{
     LayerStyle, catalog, expression_presets, find_product, should_use_categorical,
 };
@@ -531,6 +539,130 @@ pub enum Commands {
         /// Optional band hint (e.g. B01_WTR, VEG-DIST-STATUS).
         #[arg(long)]
         band: Option<String>,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Parse, normalize, or group Sentinel-1 burst IDs and dates from filenames or granule URs (opera-utils).
+    BurstId {
+        /// One or more burst IDs, filenames, granule URs, or URLs.
+        #[arg(required = true)]
+        inputs: Vec<String>,
+        /// Group inputs by normalized burst ID.
+        #[arg(long)]
+        group: bool,
+        /// Also extract acquisition dates (YYYY-MM-DD) from each filename stem.
+        #[arg(long)]
+        dates: bool,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Look up DISP-S1 frame metadata, UTM/WGS 84 bounds, orbit pass, and burst IDs from opera-adt/burst_db.
+    Frame {
+        /// Numeric DISP-S1 frame ID (e.g. 11114), or a Sentinel-1 burst ID with --from-burst.
+        id: String,
+        /// Treat ID as a Sentinel-1 burst ID (e.g. T042-088905-IW1) and return its DISP-S1 frame IDs.
+        #[arg(long)]
+        from_burst: bool,
+        /// Report frame bounds in WGS 84 latitude/longitude (EPSG:4326) instead of native UTM.
+        #[arg(long)]
+        latlon: bool,
+        /// Print only the 4-element bounding box array [xmin, ymin, xmax, ymax].
+        #[arg(long)]
+        bounds_only: bool,
+        /// Print only constituent normalized burst IDs (one per line or JSON array).
+        #[arg(long)]
+        burst_ids_only: bool,
+        /// Optional path to a local frame-to-burst (or burst-to-frame with --from-burst) JSON/ZIP file.
+        #[arg(long, value_name = "FILE")]
+        db_file: Option<PathBuf>,
+        /// Optional path to a local frame-geometries-simple GeoJSON/ZIP file (used for orbit pass and -o export).
+        #[arg(long, value_name = "FILE")]
+        geom_file: Option<PathBuf>,
+        /// Optional output file (.geojson, .gpkg, .shp) to export the frame geometry.
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Find DISP-S1 frames whose simplified WGS 84 geometry intersects an AOI or point (opera-utils).
+    FramesIntersect {
+        #[command(flatten)]
+        aoi: AoiArgs,
+        /// Optional single point longitude (EPSG:4326), paired with --lat.
+        #[arg(long, allow_hyphen_values = true, requires = "lat")]
+        lon: Option<f64>,
+        /// Optional single point latitude (EPSG:4326), paired with --lon.
+        #[arg(long, allow_hyphen_values = true, requires = "lon")]
+        lat: Option<f64>,
+        /// Print only matching integer frame IDs (one per line or JSON array).
+        #[arg(long)]
+        ids_only: bool,
+        /// Optional path to a local frame-geometries-simple GeoJSON/ZIP file.
+        #[arg(long, value_name = "FILE")]
+        db_file: Option<PathBuf>,
+        /// Write matching frame geometries to GeoJSON, GeoPackage (.gpkg), or Shapefile (.shp).
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Compute optimal Sentinel-1 burst/date subsets for missing CSLC acquisitions (opera-utils).
+    MissingData {
+        /// CSLC filenames, granule URs, or URLs (may also be supplied via --file).
+        inputs: Vec<String>,
+        /// Read newline-separated CSLC filenames/URLs from a text file.
+        #[arg(short, long, value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// Maximum number of ranked subset options to return.
+        #[arg(long, default_value_t = 5)]
+        max_options: usize,
+        /// Write each ranked option's selected file list to disk.
+        #[arg(long)]
+        write_options: bool,
+        /// Filename prefix used with --write-options.
+        #[arg(long, default_value = "option_")]
+        output_prefix: String,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Search NASA CMR for OPERA L3 DISP-S1 surface displacement products by frame ID or AOI (opera-utils).
+    DispSearch {
+        /// Optional DISP-S1 frame ID (e.g. 11115, 20697).
+        #[arg(long)]
+        frame_id: Option<u32>,
+        #[command(flatten)]
+        aoi: AoiArgs,
+        /// Inclusive secondary-acquisition start date (YYYY-MM-DD).
+        #[arg(long)]
+        start: Option<String>,
+        /// Inclusive secondary-acquisition end date (YYYY-MM-DD).
+        #[arg(long)]
+        end: Option<String>,
+        /// Product version filter (default: 1.0; pass empty string for all versions).
+        #[arg(long, default_value = "1.0")]
+        product_version: String,
+        /// Preferred download URL protocol: https or s3.
+        #[arg(long, default_value = "https")]
+        url_type: String,
+        /// Keep superseded duplicate (reference, secondary) pairs instead of deduplicating.
+        #[arg(long)]
+        all_versions: bool,
+        /// Maximum number of CMR items to fetch (1-2000).
+        #[arg(long, default_value_t = 500)]
+        limit: usize,
+        /// Print only download URLs (one per line).
+        #[arg(long)]
+        urls_only: bool,
         /// Emit structured JSON output.
         #[arg(long)]
         json: bool,
@@ -1576,6 +1708,387 @@ fn dispatch(command: Commands) -> Result<()> {
             Ok(())
         }
 
+        Commands::BurstId {
+            inputs,
+            group,
+            dates,
+            json: as_json,
+        } => {
+            if group {
+                let grouped = group_by_burst(&inputs)?;
+                if as_json {
+                    print_json(&serde_json::to_value(&grouped)?)?;
+                } else {
+                    for (burst, items) in &grouped {
+                        println!("{burst} ({} files):", items.len());
+                        for item in items {
+                            println!("  {item}");
+                        }
+                    }
+                }
+            } else {
+                let mut rows = Vec::with_capacity(inputs.len());
+                for item in &inputs {
+                    let parsed = parse_burst_id(item)?;
+                    let extracted_dates: Vec<String> = if dates {
+                        get_dates(item).into_iter().map(|d| d.to_string()).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    rows.push(json!({
+                        "input": item,
+                        "burst_id": parsed.normalized,
+                        "official": parsed.official,
+                        "track": parsed.track,
+                        "burst_number": parsed.burst_number,
+                        "subswath": parsed.subswath,
+                        "dates": extracted_dates,
+                    }));
+                }
+                if as_json {
+                    print_json(&json!({ "items": rows }))?;
+                } else {
+                    for row in &rows {
+                        let bid = row["burst_id"].as_str().unwrap_or("");
+                        if dates {
+                            let ds: Vec<&str> = row["dates"]
+                                .as_array()
+                                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                                .unwrap_or_default();
+                            println!("{bid}\t{}", ds.join(","));
+                        } else {
+                            println!("{bid}");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Frame {
+            id,
+            from_burst,
+            latlon,
+            bounds_only,
+            burst_ids_only,
+            db_file,
+            geom_file,
+            output,
+            json: as_json,
+        } => {
+            if from_burst {
+                let frame_ids = get_frame_ids_for_burst(&id, db_file.as_deref())?;
+                if as_json {
+                    print_json(&json!({
+                        "burst_id": opera_rs::bursts::normalize_burst_id(&id),
+                        "frame_ids": frame_ids,
+                    }))?;
+                } else {
+                    for fid in &frame_ids {
+                        println!("{fid}");
+                    }
+                }
+                return Ok(());
+            }
+
+            let frame_id: u32 = id.trim().parse().map_err(|_| {
+                OperaError::InvalidInput(format!(
+                    "expected numeric frame ID (got '{id}'; pass --from-burst for burst IDs)"
+                ))
+            })?;
+
+            if bounds_only {
+                let fb = get_frame_bbox(frame_id, latlon, db_file.as_deref())?;
+                print_json(&serde_json::to_value(fb.bbox)?)?;
+                return Ok(());
+            }
+
+            let mut info = get_frame_to_burst_mapping(frame_id, db_file.as_deref())?;
+            if burst_ids_only {
+                if as_json {
+                    print_json(&serde_json::to_value(&info.burst_ids)?)?;
+                } else {
+                    for b in &info.burst_ids {
+                        println!("{b}");
+                    }
+                }
+                return Ok(());
+            }
+
+            // Compute requested bbox once and propagate WGS 84 reprojection errors consistently
+            // across both JSON and text output modes.
+            let fb = if latlon {
+                let wgs = match info.bbox_wgs84 {
+                    Some(b) => b,
+                    None => reproject_bbox_to_wgs84(
+                        info.epsg,
+                        [info.xmin, info.ymin, info.xmax, info.ymax],
+                    )?,
+                };
+                FrameBBox {
+                    frame_id,
+                    epsg: 4326,
+                    bbox: wgs.to_array(),
+                }
+            } else {
+                FrameBBox {
+                    frame_id,
+                    epsg: info.epsg,
+                    bbox: [info.xmin, info.ymin, info.xmax, info.ymax],
+                }
+            };
+
+            let written = if let Some(out_path) = output {
+                let fc = get_frame_geojson(Some(&[frame_id]), geom_file.as_deref())?;
+                if let Some(pass_str) = fc
+                    .get("features")
+                    .and_then(Value::as_array)
+                    .and_then(|arr| arr.first())
+                    .and_then(|f| f.get("properties"))
+                    .and_then(|p| p.get("orbit_pass"))
+                    .and_then(Value::as_str)
+                {
+                    info.orbit_pass = Some(pass_str.parse::<OrbitPass>()?);
+                }
+                let count = write_feature_collection(&fc, &out_path, "disp_frame")?;
+                Some((out_path, count))
+            } else {
+                if geom_file.is_some() {
+                    info.orbit_pass = Some(get_frame_orbit_pass(frame_id, geom_file.as_deref())?);
+                }
+                None
+            };
+
+            if as_json {
+                let mut val = serde_json::to_value(&info)?;
+                val["bbox_epsg"] = json!(fb.epsg);
+                val["bbox"] = json!(fb.bbox);
+                if let Some((ref p, count)) = written {
+                    val["written"] = json!({ "path": p, "features": count });
+                }
+                print_json(&val)?;
+            } else {
+                println!(
+                    "Frame {} | EPSG:{} | bbox={:?} | land={} | north_america={} | bursts={}",
+                    info.frame_id,
+                    fb.epsg,
+                    fb.bbox,
+                    info.is_land,
+                    info.is_north_america,
+                    info.burst_ids.len()
+                );
+                if let Some(pass) = info.orbit_pass {
+                    println!("Orbit pass: {pass}");
+                }
+                if let Some((p, count)) = written {
+                    println!("Wrote {count} frame geometry to {}", p.display());
+                }
+            }
+            Ok(())
+        }
+
+        Commands::FramesIntersect {
+            aoi,
+            lon,
+            lat,
+            ids_only,
+            db_file,
+            output,
+            json: as_json,
+        } => {
+            let has_point = lon.is_some() || lat.is_some();
+            let has_aoi = aoi.bbox.is_some() || aoi.place.is_some() || aoi.aoi_file.is_some();
+            if has_point && has_aoi {
+                return Err(OperaError::InvalidInput(
+                    "specify either --lon/--lat or --bbox/--place/--aoi-file, not both".into(),
+                ));
+            }
+            let fc = if let (Some(x), Some(y)) = (lon, lat) {
+                get_intersecting_frames_for_point(x, y, db_file.as_deref())?
+            } else if let Some((b, _)) = aoi.resolve()? {
+                get_intersecting_frames(b, db_file.as_deref())?
+            } else {
+                return Err(OperaError::InvalidInput(
+                    "specify an AOI with --bbox, --place, --aoi-file, or --lon/--lat".into(),
+                ));
+            };
+            let ids = frame_ids_from_geojson(&fc);
+            let written = if let Some(out_path) = output {
+                let count = write_feature_collection(&fc, &out_path, "disp_frames")?;
+                Some((out_path, count))
+            } else {
+                None
+            };
+
+            if ids_only {
+                if as_json {
+                    print_json(&serde_json::to_value(&ids)?)?;
+                } else {
+                    for id in &ids {
+                        println!("{id}");
+                    }
+                }
+            } else if as_json {
+                if let Some((p, count)) = written {
+                    print_json(&json!({
+                        "frame_ids": ids,
+                        "count": ids.len(),
+                        "written": { "path": p, "features": count },
+                    }))?;
+                } else {
+                    print_json(&fc)?;
+                }
+            } else {
+                println!(
+                    "Found {} intersecting DISP-S1 frame(s): {}",
+                    ids.len(),
+                    ids.iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                if let Some((p, count)) = written {
+                    println!("Wrote {count} frame geometries to {}", p.display());
+                }
+            }
+            Ok(())
+        }
+
+        Commands::MissingData {
+            inputs,
+            file,
+            max_options,
+            write_options,
+            output_prefix,
+            json: as_json,
+        } => {
+            let mut all_files = inputs;
+            if let Some(list_path) = file {
+                let text = std::fs::read_to_string(&list_path)?;
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                        all_files.push(trimmed.to_string());
+                    }
+                }
+            }
+            if all_files.is_empty() {
+                return Err(OperaError::InvalidInput(
+                    "provide CSLC filenames as positional arguments or via --file".into(),
+                ));
+            }
+            let options = get_missing_data_options_limited(&all_files, Some(max_options.max(1)))?;
+
+            let mut written_paths = Vec::new();
+            if write_options {
+                for (idx, opt) in options.iter().enumerate() {
+                    let path = format!(
+                        "{output_prefix}{}_bursts_{}_burst_ids_{}_dates_{}.txt",
+                        idx + 1,
+                        opt.total_num_bursts,
+                        opt.num_burst_ids,
+                        opt.num_dates
+                    );
+                    let mut body = opt.inputs.join("\n");
+                    if !body.is_empty() {
+                        body.push('\n');
+                    }
+                    std::fs::write(&path, body)?;
+                    written_paths.push(path);
+                }
+            }
+
+            if as_json {
+                print_json(&json!({
+                    "options": options,
+                    "written_files": written_paths,
+                }))?;
+            } else {
+                println!(
+                    "{:<8} {:<10} {:<12} {:<16} {:<16}",
+                    "Option", "# Dates", "# Burst IDs", "Selected Bursts", "Excluded Bursts"
+                );
+                for (idx, opt) in options.iter().enumerate() {
+                    println!(
+                        "{:<8} {:<10} {:<12} {:<16} {:<16}",
+                        idx + 1,
+                        opt.num_dates,
+                        opt.num_burst_ids,
+                        opt.total_num_bursts,
+                        opt.excluded_bursts
+                    );
+                }
+                for path in &written_paths {
+                    println!("Wrote {path}");
+                }
+            }
+            Ok(())
+        }
+
+        Commands::DispSearch {
+            frame_id,
+            aoi,
+            start,
+            end,
+            product_version,
+            url_type,
+            all_versions,
+            limit,
+            urls_only,
+            json: as_json,
+        } => {
+            let parsed_url_type: UrlType = url_type.parse()?;
+            let resolved_bbox = aoi.resolve()?.map(|(b, _)| b);
+            if frame_id.is_none() && resolved_bbox.is_none() {
+                return Err(OperaError::InvalidInput(
+                    "specify --frame-id or an AOI (--bbox, --place, or --aoi-file)".into(),
+                ));
+            }
+            let version_filter = if product_version.trim().is_empty() {
+                None
+            } else {
+                Some(product_version)
+            };
+            let params = DispSearchParams {
+                frame_id,
+                bbox: resolved_bbox,
+                product_version: version_filter,
+                start,
+                end,
+                url_type: parsed_url_type,
+                deduplicate: !all_versions,
+                limit,
+                cmr_endpoint: None,
+            };
+            let res = search_disp_products(&params)?;
+            if urls_only {
+                for p in &res.products {
+                    println!("{}", p.filename);
+                }
+            } else if as_json {
+                print_json(&serde_json::to_value(&res)?)?;
+            } else {
+                println!(
+                    "Found {} DISP-S1 product(s) across {} frame(s) (CMR hits={}, duplicates removed={})",
+                    res.products.len(),
+                    res.frame_ids.len(),
+                    res.total_hits,
+                    res.duplicates_removed
+                );
+                for p in res.products.iter().take(20) {
+                    println!(
+                        "  F{:05} | {} -> {} | v{} | {}",
+                        p.frame_id,
+                        &p.reference_datetime[..10],
+                        &p.secondary_datetime[..10],
+                        p.version,
+                        p.filename
+                    );
+                }
+            }
+            Ok(())
+        }
+
         Commands::Mcp => unreachable!("handled before dispatch"),
     }
 }
@@ -1658,5 +2171,115 @@ mod tests {
         assert!(resolve_endpoint(Some("https://titiler-cmr.opengeos.org")).is_ok());
         assert!(resolve_endpoint(Some("http://localhost:8080")).is_ok());
         assert!(resolve_endpoint(Some("file:///etc/passwd")).is_err());
+    }
+
+    #[test]
+    fn runs_opera_utils_cli_subcommands_offline() {
+        assert_eq!(
+            run([
+                "opera",
+                "burst-id",
+                "OPERA_L2_CSLC-S1_T087-185683-IW2_20230322T161649Z_20240504T185235Z_S1A_VV_v1.1.h5",
+                "--dates",
+                "--json"
+            ]),
+            0
+        );
+        assert_eq!(
+            run([
+                "opera",
+                "missing-data",
+                "t087_185683_iw1_20230101.h5",
+                "t087_185683_iw1_20230113.h5",
+                "t087_185683_iw2_20230101.h5",
+                "--json"
+            ]),
+            0
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let f2b = dir.path().join("f2b.json");
+        std::fs::write(
+            &f2b,
+            serde_json::to_vec(&json!({
+                "data": {
+                    "11114": {
+                        "epsg": 32610,
+                        "is_land": true,
+                        "is_north_america": true,
+                        "xmin": 546450,
+                        "ymin": 4204110,
+                        "xmax": 833790,
+                        "ymax": 4409070,
+                        "burst_ids": ["t042_088905_iw1"]
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            run([
+                "opera",
+                "frame",
+                "11114",
+                "--latlon",
+                "--db-file",
+                f2b.to_str().unwrap(),
+                "--json"
+            ]),
+            0
+        );
+
+        let geoms = dir.path().join("frames.geojson");
+        std::fs::write(
+            &geoms,
+            serde_json::to_vec(&json!({
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "id": 11114,
+                    "properties": {"orbit_pass": "DESCENDING"},
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[-122.5, 37.9], [-119.1, 37.9], [-119.1, 39.8], [-122.5, 39.8], [-122.5, 37.9]]]
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            run([
+                "opera",
+                "frames-intersect",
+                "--lon",
+                "-120.5",
+                "--lat",
+                "38.5",
+                "--ids-only",
+                "--db-file",
+                geoms.to_str().unwrap(),
+                "--json"
+            ]),
+            0
+        );
+
+        let disp_cli = Cli::try_parse_from([
+            "opera",
+            "disp-search",
+            "--frame-id",
+            "11115",
+            "--end",
+            "2024-01-01",
+            "--url-type",
+            "s3",
+            "--json",
+        ])
+        .expect("parse disp-search");
+        assert!(matches!(
+            disp_cli.command,
+            Some(Commands::DispSearch { .. })
+        ));
     }
 }

@@ -59,14 +59,22 @@ const INSTRUCTIONS: &str = "opera-rs searches, visualizes, and analyzes NASA OPE
 - Use `change` for two-date before/after analysis (water area deltas in km^2 or SAR backscatter shifts), `timeseries` for multi-date trends, and `flood-extent` to vectorize observed DSWx surface water into GeoJSON or GeoPackage polygons (explicitly OPERA-observed, not human-QAed).\n\
 - Use `flood-extent` with `-o FILE` (or `search` with `-o FILE` for large footprint results) when requesting `--json` so bulky GeoJSON polygons are written to disk rather than exceeding the 100 KB MCP response limit.\n\
 - Use `preview` without `-o` to receive the rendered map PNG directly as inline image content (with CARTO Voyager basemap, scale bar, and legend) without leaving temporary files behind.\n\
+- For Sentinel-1 CSLC and DISP-S1 workflows (opera-utils), use `burst-id` to parse/group burst IDs and dates, `frame` and `frames-intersect` to query the official `opera-adt/burst_db` v0.9.0 DISP-S1 frame database, `missing-data` to select optimal rectangular burst/date subsets, and `disp-search` to find DISP-S1 products by frame ID or AOI.\n\
 - Use `prompts/list` for guided step-by-step OPERA analysis workflows.";
 
 /// Commands that only read data and never write output files.
 const READ_ONLY: &[&str] = &[
-    "products", "geocode", "tilejson", "point", "stats", "inspect",
+    "products",
+    "geocode",
+    "tilejson",
+    "point",
+    "stats",
+    "inspect",
+    "burst-id",
+    "disp-search",
 ];
 
-/// Commands that contact external network services (NASA CMR, titiler-cmr, Nominatim, CARTO).
+/// Commands that contact external network services (NASA CMR, titiler-cmr, Nominatim, CARTO, GitHub burst_db).
 const OPEN_WORLD: &[&str] = &[
     "geocode",
     "search",
@@ -79,6 +87,9 @@ const OPEN_WORLD: &[&str] = &[
     "preview",
     "animate",
     "export-html",
+    "frame",
+    "frames-intersect",
+    "disp-search",
 ];
 
 type RpcError = (i64, String);

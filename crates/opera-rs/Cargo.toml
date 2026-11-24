@@ -21,6 +21,7 @@ geo = ["dep:terrio"]
 parallel = ["dep:rayon"]
 
 [dependencies]
+flate2.workspace = true
 gif.workspace = true
 png.workspace = true
 serde.workspace = true

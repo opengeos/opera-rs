@@ -1,6 +1,6 @@
 # CLI Reference
 
-The `opera` command-line tool provides 13 structured NASA OPERA subcommands (each supporting `--json` output and `--json-usage` schema introspection) plus a built-in Model Context Protocol server (`opera mcp`).
+The `opera` command-line tool provides 18 structured NASA OPERA subcommands (each supporting `--json` output and `--json-usage` schema introspection) plus a built-in Model Context Protocol server (`opera mcp`).
 
 ## Spatial AOI Selection
 
@@ -27,6 +27,11 @@ Every spatial command (`search`, `stats`, `change`, `timeseries`, `flood-extent`
 | `opera animate` | Render a multi-date animated GIF across OPERA acquisitions |
 | `opera export-html` | Export a self-contained MapLibre GL JS interactive HTML viewer |
 | `opera inspect <FILE>` | Inspect a local OPERA GeoTIFF/COG on disk via `terrio` (CRS, stats, class areas) |
+| `opera burst-id <INPUTS...>` | Parse, normalize, or group Sentinel-1 burst IDs and dates from filenames or granule URs |
+| `opera frame <ID>` | Look up DISP-S1 frame metadata, UTM/WGS 84 bounds, orbit pass, and burst IDs (`burst_db` v0.9.0) |
+| `opera frames-intersect` | Find DISP-S1 frames intersecting a `--bbox`, `--place`, `--aoi-file`, or `--lon`/`--lat` |
+| `opera missing-data` | Compute ranked rectangular Sentinel-1 burst/date subsets for missing CSLC data |
+| `opera disp-search` | Search NASA CMR for `OPERA_L3_DISP-S1_V1` products by `--frame-id` or AOI with deduplication |
 | `opera mcp` | Start the JSON-RPC 2.0 Model Context Protocol (MCP) server over stdio |
 
 ## Common Workflows
@@ -103,6 +108,26 @@ opera export-html --product dswx-hls --bbox -119.95,35.85,-119.45,36.25 \
 ```sh
 # Inspect a local OPERA GeoTIFF/COG on disk (CRS, band stats, categorical class areas)
 opera inspect OPERA_L3_DSWx-HLS_B01_WTR.tif --product dswx-hls --json
+```
+
+### Sentinel-1 Bursts, DISP-S1 Frames, and Missing Data (`opera-utils`)
+
+```sh
+# Parse and normalize Sentinel-1 burst IDs and dates from CSLC filenames
+opera burst-id OPERA_L2_CSLC-S1_T087-185683-IW2_20230322T161649Z_20240504T185235Z_S1A_VV_v1.1.h5 --dates --json
+
+# Look up DISP-S1 frame metadata (WGS 84 bounds, orbit pass, and constituent burst IDs)
+opera frame 11114 --latlon --json
+opera frame T042-088905-IW1 --from-burst --json
+
+# Find DISP-S1 frames intersecting an AOI or point
+opera frames-intersect --bbox -122.0,37.0,-121.0,38.0 --ids-only
+
+# Compute optimal rectangular burst/date subsets for missing CSLC acquisitions
+opera missing-data --file cslc_list.txt --max-options 5 --json
+
+# Search NASA CMR for DISP-S1 products for a frame (HTTPS or S3 URLs)
+opera disp-search --frame-id 11115 --end 2016-10-01 --json
 ```
 
 ## Machine-Readable Usage Catalog

@@ -87,9 +87,9 @@ Once connected, you can ask your AI assistant questions such as:
 
 | Safeguard | Value / Behavior |
 | --- | --- |
-| Read-only tool hints (`readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`) | `products`, `geocode`, `tilejson`, `point`, `stats`, `inspect` |
-| Local-only tools (`openWorldHint: false`) | `products`, `inspect` |
-| Network tools (`openWorldHint: true`) | `geocode`, `search`, `tilejson`, `point`, `stats`, `change`, `timeseries`, `flood-extent`, `preview`, `animate`, `export-html` |
+| Read-only tool hints (`readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`) | `products`, `geocode`, `tilejson`, `point`, `stats`, `inspect`, `burst-id`, `disp-search` |
+| Local-only tools (`openWorldHint: false`) | `products`, `inspect`, `burst-id`, `missing-data` |
+| Network tools (`openWorldHint: true`) | `geocode`, `search`, `tilejson`, `point`, `stats`, `change`, `timeseries`, `flood-extent`, `preview`, `animate`, `export-html`, `frame`, `frames-intersect`, `disp-search` |
 | Combined stdout/stderr cap | 100,000 bytes (stderr preserved first) |
 | Inline PNG preview cap | 8 MiB |
 | Concurrency & cancellation | Up to 8 concurrent isolated child processes with `notifications/cancelled` and graceful EOF drain |

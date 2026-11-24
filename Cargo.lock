@@ -963,6 +963,7 @@ dependencies = [
 name = "opera-rs"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "gif",
  "png 0.17.16",
  "rayon",

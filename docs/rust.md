@@ -34,6 +34,10 @@ opera-rs = { version = "0.1", default-features = false }
 | `opera_rs::flood_extent` | Water-only tile union, mask stitching, and RFC 7946 polygon vectorization with nested holes |
 | `opera_rs::viz` | Pure-Rust PNG preview rendering, before/after comparison panels, animated GIFs, and MapLibre HTML export |
 | `opera_rs::geo_io` | Pure-Rust vector AOI reading, GeoJSON/GeoPackage/Shapefile writing, and local GeoTIFF/COG inspection via `terrio` |
+| `opera_rs::bursts` | Sentinel-1 burst ID parsing/normalization, filename date extraction, and CSLC filename parsing (`opera-utils`) |
+| `opera_rs::burst_db` | `opera-adt/burst_db` v0.9.0 archive caching, SHA-256 verification, frame/burst mappings, and polygon-bbox intersection |
+| `opera_rs::missing_data` | Optimal rectangular `(burst_ids x dates)` subset selection for missing Sentinel-1 CSLC acquisitions |
+| `opera_rs::disp` | DISP-S1 filename parsing, deduplicated `DispProductStack`, dataset enums, and public NASA CMR frame search |
 
 ## Search and Change Detection Example
 
