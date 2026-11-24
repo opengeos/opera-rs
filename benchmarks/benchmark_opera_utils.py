@@ -27,6 +27,7 @@ from typing import Any, Callable
 import geopandas as gpd
 import opera_rs
 import opera_utils
+import pyogrio
 from opera_utils import burst_frame_db, datasets, disp, missing_data
 
 
@@ -62,8 +63,7 @@ def clear_opera_utils_caches() -> None:
         burst_frame_db.get_frame_to_burst_mapping,
         burst_frame_db.get_burst_to_frame_mapping,
     ):
-        if hasattr(fn, "cache_clear"):
-            fn.cache_clear()
+        fn.cache_clear()
 
 
 def build_cslc_stack(num_dates: int, gaps: dict[int, set[int]]) -> list[str]:
@@ -145,9 +145,9 @@ def main() -> None:
     record("Startup", "Python `import` + GeoPandas (fresh process)", rs_imp, py_imp_geo)
 
     if Path(args.opera_bin).exists() and Path(args.opera_utils_bin).exists():
-        rs_cli = bench_proc([args.opera_bin, "--version"], repeats, warmup)
+        rs_cli = bench_proc([args.opera_bin, "--help"], repeats, warmup)
         py_cli = bench_proc([args.opera_utils_bin, "--help"], repeats, warmup)
-        record("Startup", "CLI startup (`--version` / `--help`)", rs_cli, py_cli)
+        record("Startup", "CLI startup (`--help`)", rs_cli, py_cli)
 
     # 2. Burst ID & date parsing (10,000 realistic CSLC-S1 filenames)
     cslc_files = [
@@ -172,7 +172,7 @@ def main() -> None:
     disp_files = [
         f"OPERA_L3_DISP-S1_IW_F{11114 + (i % 50):05d}_VV_"
         f"20160705T140755Z_2023{(i % 12) + 1:02d}{(i % 28) + 1:02d}T140812Z_"
-        f"v1.0_20241219T231545Z.nc"
+        "v1.0_20241219T231545Z.nc"
         for i in range(10_000)
     ]
     rs_disp, _ = bench(
@@ -323,7 +323,7 @@ def main() -> None:
                 [
                     py_exe,
                     "-c",
-                    f"from pathlib import Path; from opera_utils.missing_data import get_missing_data_options; "
+                    "from pathlib import Path; from opera_utils.missing_data import get_missing_data_options; "
                     f"get_missing_data_options(Path({str(list_txt)!r}).read_text().splitlines())",
                 ],
                 heavy_repeats,
@@ -332,6 +332,8 @@ def main() -> None:
             record("CLI (E2E)", f"Missing-data optimization ({len(stack_48)} CSLCs)", rs_cli_md, py_cli_md)
 
         fc_500 = opera_rs.get_frame_geojson(list(range(10000, 10500)), json_file=frame_geom_path)
+        n_polys = len(fc_500["features"])
+        assert n_polys == 500, f"expected 500 frames, got {n_polys}"
         gdf_500 = gpd.GeoDataFrame.from_features(fc_500["features"], crs="EPSG:4326")
         gpkg_rs = str(Path(td) / "rs.gpkg")
         gpkg_py = str(Path(td) / "py.gpkg")
@@ -346,11 +348,21 @@ def main() -> None:
             heavy_repeats,
             heavy_warmup,
         )
-        record("Vector I/O", "Write 500 frame polygons to GeoPackage (.gpkg)", rs_w, py_w)
+        record("Vector I/O", f"Write {n_polys} frame polygons to GeoPackage (.gpkg)", rs_w, py_w)
 
         rs_r, _ = bench(lambda: opera_rs.read_aoi_bbox(gpkg_rs), heavy_repeats, heavy_warmup)
-        py_r, _ = bench(lambda: list(gpd.read_file(gpkg_py).total_bounds), heavy_repeats, heavy_warmup)
-        record("Vector I/O", "Read AOI bbox from GeoPackage (500 polys)", rs_r, py_r)
+        py_r_bounds, _ = bench(
+            lambda: pyogrio.read_bounds(gpkg_py, layer="frames"),
+            heavy_repeats,
+            heavy_warmup,
+        )
+        py_r_gpd, _ = bench(
+            lambda: list(gpd.read_file(gpkg_py).total_bounds),
+            heavy_repeats,
+            heavy_warmup,
+        )
+        record("Vector I/O", f"Read bounds from GeoPackage ({n_polys} polys, pyogrio)", rs_r, py_r_bounds)
+        record("Vector I/O", f"Read GeoDataFrame total_bounds ({n_polys} polys, gpd)", rs_r, py_r_gpd)
 
     if args.json_out is not None:
         args.json_out.write_text(json.dumps(results, indent=2) + "\n")

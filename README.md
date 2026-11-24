@@ -135,12 +135,12 @@ Measured on Linux x86_64 (Python 3.12, release build) against identical local ca
 | --- | --- | --- | --- |
 | Installed footprint (wheel / `site-packages`) | **1 pkg / 38 MB** (0 GDAL/C deps) | 56 pkgs / 446 MB | **11.7x smaller** |
 | Python `import` (fresh process) | **27.6 ms** | 523.9 ms | **19.0x faster** |
-| CLI cold start (standalone `opera` vs `opera-utils`) | **3.5 ms** | 828.8 ms | **237x faster** |
+| CLI cold start (standalone `opera --help` vs `opera-utils --help`) | **3.2 ms** | 847.5 ms | **263x faster** |
 | `get_dates` x 10,000 CSLC filenames (Python API) | **5.3 ms** | 92.7 ms | **17.5x faster** |
 | `get_missing_data_options` (1,276 CSLCs, 27x48, Python API) | **48.4 ms** | 2,859.7 ms | **59.1x faster** |
 | End-to-end CLI `missing-data` (1,276 CSLCs, native binary) | **11.7 ms** | 3,438.5 ms | **293.9x faster** |
 | `get_intersecting_frames` (46,986 frames, zip) | **174.1 ms** | 406.4 ms | **2.3x faster** |
-| Read AOI bbox from GeoPackage (500 polygons) | **2.0 ms** | 3.5 ms (`pyogrio`/GDAL) | **1.7x faster** |
+| Read AOI bounds from GeoPackage (500 polygons) | **1.9 ms** | 1.9 ms (`pyogrio`) / 3.5 ms (`geopandas`) | **1.0x to 1.8x** |
 
 ## Interactive Notebooks
 

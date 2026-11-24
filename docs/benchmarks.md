@@ -7,16 +7,16 @@ This page compares `opera-rs` against the upstream Python [`opera-utils`](https:
 ## Methodology & Hardware
 
 - **Machine:** Linux x86_64, Intel Xeon w7-3445 (40 logical cores)
-- **Software:** Python 3.12.13, `opera-rs` 0.1.0 (release build), `opera-utils` 0.25.9, `geopandas` 1.2.0, `shapely` 2.2.0, `pyogrio` 0.13.0
+- **Software:** Python 3.12.13, `opera-rs` built from `main` (pre-0.2.0, release build), `opera-utils` 0.25.9, `geopandas` 1.2.0, `shapely` 2.2.0, `pyogrio` 0.13.0
 - **Fairness controls:**
   - Both implementations read the exact same local cached `opera-adt/burst_db` v0.9.0 `.zip` archives on disk (zero network latency).
   - For archive queries, `opera_utils`'s in-process `@functools.cache` is cleared before each timed run so both tools measure actual ZIP decompression, JSON parsing, and query execution.
-  - Every benchmark asserts output parity between `opera-rs` and `opera-utils` (identical burst counts, frame IDs, and optimal missing-data subset totals).
+  - Key Python API benchmarks assert result parity between `opera-rs` and `opera-utils` (identical burst group counts, `burst_db` burst/frame ID lists, intersecting frame IDs, and top missing-data subset totals).
   - Timings report the **median** across 5 to 7 timed runs after warmup.
-- **Reproduce locally:** Run [`benchmarks/benchmark_opera_utils.py`](https://github.com/opengeos/opera-rs/blob/main/benchmarks/benchmark_opera_utils.py):
+- **Reproduce locally:** Run [`benchmarks/benchmark_opera_utils.py`](https://github.com/opengeos/opera-rs/blob/main/benchmarks/benchmark_opera_utils.py) (requires `opera-rs >= 0.2.0` or a local build from `main`):
 
 ```sh
-pip install opera-rs "opera-utils[disp]" geopandas shapely
+pip install "opera-rs>=0.2.0" "opera-utils[disp]" geopandas shapely
 python benchmarks/benchmark_opera_utils.py
 ```
 
@@ -38,8 +38,8 @@ Startup latency directly affects shell pipelines, serverless functions, and AI a
 | --- | --- | --- | --- |
 | Python `import` (fresh process) | **27.6 ms** | 523.9 ms (`opera_utils`) | **19.0x** |
 | Python `import` + GeoPandas (fresh process) | **27.6 ms** | 514.7 ms (`opera_utils, geopandas`) | **18.6x** |
-| CLI startup (`opera --version` vs `opera-utils --help`, PyPI shim) | **24.3 ms** | 828.8 ms | **34.1x** |
-| CLI startup (standalone Rust `opera` binary vs `opera-utils`) | **3.5 ms** | 828.8 ms | **237x** |
+| CLI startup (`opera --help` vs `opera-utils --help`, PyPI shim) | **31.0 ms** | 847.5 ms | **27.4x** |
+| CLI startup (standalone Rust `opera --help` vs `opera-utils --help`) | **3.2 ms** | 847.5 ms | **263x** |
 
 ## 3. Burst Parsing, DISP-S1 Filenames & Missing-Data Optimization (Python API)
 
@@ -71,7 +71,7 @@ Wall-clock latency of complete CLI invocations from cold process start to JSON/t
 
 | Task | `opera` (PyPI shim) | `opera` (native Rust binary) | Python (`opera-utils`) | Speedup (native) |
 | --- | --- | --- | --- | --- |
-| Frame bbox lookup (`frame 11114 --latlon`) | **284.8 ms** | 337.5 ms | 1,150.2 ms | **3.4x to 4.0x** |
+| Frame bbox lookup (`frame 11114 --latlon`) | **284.8 ms** | 337.5 ms | 1,150.2 ms | **3.4x** |
 | Intersecting frames over AOI (46,986 frames) | **261.6 ms** | **255.5 ms** | 944.1 ms | **3.7x** |
 | Missing-data optimization (1,276 CSLCs, 27x48) | **33.9 ms** | **11.7 ms** | 3,438.5 ms | **293.9x** |
 
@@ -79,13 +79,14 @@ Wall-clock latency of complete CLI invocations from cold process start to JSON/t
 
 Writing and reading 500 DISP-S1 frame polygons to/from a local GeoPackage (`.gpkg`):
 
-| Task | `opera-rs` (`terrio`, zero GDAL) | GeoPandas + `pyogrio` (GDAL) | Speedup |
+| Task | `opera-rs` (`terrio`, zero GDAL) | Python (GeoPandas / `pyogrio` GDAL) | Speedup |
 | --- | --- | --- | --- |
-| Read AOI bounding box from GeoPackage (500 polygons) | **2.0 ms** | 3.5 ms | **1.7x** |
-| Write 500 frame polygons to GeoPackage (`.gpkg`) | 5.8 ms | **5.3 ms** | 0.9x (parity) |
+| Read AOI bounds from GeoPackage (500 polygons, bounds-only) | **1.9 ms** | **1.9 ms** (`pyogrio.read_bounds`) | **1.0x** (parity) |
+| Read AOI bounds via full GeoDataFrame load (500 polygons) | **1.9 ms** | 3.5 ms (`gpd.read_file().total_bounds`) | **1.8x** |
+| Write 500 frame polygons to GeoPackage (`.gpkg`) | 5.8 ms | **5.3 ms** (`gdf.to_file`) | 0.9x (parity) |
 
 ## Key Takeaways
 
-- **Combinatorial & CLI workloads see the biggest gains (19x to 294x):** Pure-Rust subset optimization (`missing-data`) avoids Python object allocation and NumPy per-iteration overhead, running **37x to 59x** faster from Python and **294x** faster via the standalone `opera` CLI. Cold CLI and MCP tool calls also skip Python's ~520 to 830 ms import overhead.
+- **Combinatorial & CLI workloads see the biggest gains (19x to 294x):** Pure-Rust subset optimization (`missing-data`) avoids Python object allocation and NumPy per-iteration overhead, running **37x to 59x** faster from Python and **294x** faster via the standalone `opera` CLI. Cold CLI and MCP tool calls also skip Python's ~520 to 850 ms import overhead.
 - **ZIP/JSON-bound `burst_db` queries are 1.2x to 2.3x faster uncached:** Reading a 3 to 4 MB compressed archive that inflates into tens of megabytes of JSON is largely bound by DEFLATE decompression and JSON parsing, where Rust's `flate2` + `serde_json` still beats Python's `zipfile` + `json` + `shapely` (especially on spatial intersection across all 46,986 polygons: 174 ms vs 406 ms). Note that for repeated in-process Python lookups against the same archive, `opera_utils` caches the parsed dictionary in memory via `@functools.cache`.
-- **GeoPackage I/O matches C GDAL with zero GDAL dependencies:** Through `terrio`, `opera-rs` reads GeoPackage AOI bounds **1.7x faster** than GeoPandas/`pyogrio` and writes 500 polygons in **5.8 ms** (matching GDAL's 5.3 ms) while shipping a single 12 MB wheel with zero external dependencies.
+- **GeoPackage I/O matches C GDAL with zero GDAL dependencies:** Through `terrio`, `opera-rs` matches native C `pyogrio.read_bounds` (1.9 ms vs 1.9 ms), runs **1.8x faster** than a full `geopandas.read_file().total_bounds` load (3.5 ms), and writes 500 polygons in **5.8 ms** (matching GDAL's 5.3 ms) while shipping a single 12 MB wheel with zero external dependencies.
