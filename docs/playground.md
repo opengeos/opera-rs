@@ -14,16 +14,18 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
 
   <!-- TAB 1: LIVE OPERA MAP & ANALYTICS -->
   <section class="op-panel" id="op-panel-explorer" role="tabpanel">
-    <div class="op-presets">
-      <span>Presets:</span>
-      <button type="button" data-preset="tulare">Tulare Lake 2023 Flood (DSWx-HLS)</button>
-      <button type="button" data-preset="valencia">Valencia 2024 Flood (DSWx-S1)</button>
-      <button type="button" data-preset="gsl">Great Salt Lake (DSWx-HLS)</button>
-      <button type="button" data-preset="la-fire">Los Angeles 2025 Fire (DIST-ALERT)</button>
-      <button type="button" data-preset="houston">Houston SAR Backscatter (RTC-S1)</button>
-    </div>
-
     <div class="op-controls">
+      <div class="op-field">
+        <label for="op-preset-select">Preset</label>
+        <select id="op-preset-select">
+          <option value="tulare" selected>Tulare Lake 2023 Flood (DSWx-HLS)</option>
+          <option value="valencia">Valencia 2024 Flood (DSWx-S1)</option>
+          <option value="gsl">Great Salt Lake (DSWx-HLS)</option>
+          <option value="la-fire">Los Angeles 2025 Fire (DIST-ALERT)</option>
+          <option value="houston">Houston SAR Backscatter (RTC-S1)</option>
+          <option value="custom">Custom</option>
+        </select>
+      </div>
       <div class="op-field">
         <label for="op-product">OPERA Product</label>
         <select id="op-product"></select>
@@ -90,7 +92,7 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
         <p class="op-hint" id="op-stats-note">Computes live zonal statistics from <code>titiler-cmr</code> and calculates 30 m class areas (km<sup>2</sup>) in Rust WebAssembly.</p>
         <canvas id="op-stats-chart" width="440" height="220"></canvas>
         <div id="op-stats-table-wrap" class="op-mini-table-wrap" hidden>
-          <table>
+          <table class="op-table">
             <thead>
               <tr><th>Class / Metric</th><th>Pixels</th><th>%</th><th>Area (km<sup>2</sup>)</th></tr>
             </thead>
@@ -114,7 +116,7 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
         </div>
       </div>
       <div class="op-table-wrap">
-        <table>
+        <table class="op-table">
           <thead>
             <tr>
               <th>Date</th>
@@ -132,10 +134,12 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
 
   <!-- TAB 2: BURST & DISP-S1 PARSER (WASM) -->
   <section class="op-panel" id="op-panel-bursts" role="tabpanel" hidden>
-    <div class="op-presets">
-      <span>Load sample:</span>
-      <button type="button" id="op-load-cslc-sample">CSLC-S1 + COMPRESSED-CSLC-S1 Filenames</button>
-      <button type="button" id="op-load-disp-sample">DISP-S1 Stack with Superseded Versions</button>
+    <div class="op-inline-bar">
+      <label for="op-burst-sample-select">Sample dataset</label>
+      <select id="op-burst-sample-select">
+        <option value="cslc" selected>CSLC-S1 + COMPRESSED-CSLC-S1 Filenames</option>
+        <option value="disp">DISP-S1 Stack with Superseded Versions</option>
+      </select>
     </div>
 
     <div class="op-field">
@@ -151,7 +155,7 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
     <div id="op-burst-results" hidden>
       <h4>Parsed Items</h4>
       <div class="op-table-wrap">
-        <table>
+        <table class="op-table">
           <thead>
             <tr>
               <th>Kind</th>
@@ -168,7 +172,7 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
       <div id="op-burst-groups-wrap" hidden>
         <h4>Grouped by Normalized Burst ID</h4>
         <div class="op-table-wrap">
-          <table>
+          <table class="op-table">
             <thead>
               <tr><th>Burst ID</th><th>File Count</th><th>Files</th></tr>
             </thead>
@@ -181,11 +185,13 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
 
   <!-- TAB 3: MISSING-DATA SUBSET OPTIMIZER (WASM) -->
   <section class="op-panel" id="op-panel-missing" role="tabpanel" hidden>
-    <div class="op-presets">
-      <span>Sample stack:</span>
-      <button type="button" id="op-md-sample-12">12 Bursts x 10 Dates (7 gaps)</button>
-      <button type="button" id="op-md-sample-27">27 Bursts x 24 Dates (12 gaps)</button>
-      <button type="button" id="op-md-random-gaps">Add Random Gaps</button>
+    <div class="op-inline-bar">
+      <label for="op-md-sample-select">Sample stack</label>
+      <select id="op-md-sample-select">
+        <option value="12x10" selected>12 Bursts x 10 Dates (7 gaps)</option>
+        <option value="27x24">27 Bursts x 24 Dates (12 gaps)</option>
+      </select>
+      <button type="button" id="op-md-random-gaps" class="op-icon-btn">Add Random Gaps</button>
       <span class="op-hint">Tip: click any cell in the matrix below to toggle a missing acquisition live.</span>
     </div>
 
@@ -215,7 +221,7 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
         </div>
         <p class="op-hint">Click any option row to highlight its rectangular subset on the availability matrix.</p>
         <div class="op-table-wrap op-table-wrap--tall">
-          <table>
+          <table class="op-table">
             <thead>
               <tr>
                 <th>#</th>
@@ -234,14 +240,16 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
 
   <!-- TAB 4: LIVE DISP-S1 FRAME SEARCH -->
   <section class="op-panel" id="op-panel-disp" role="tabpanel" hidden>
-    <div class="op-presets">
-      <span>Frame presets:</span>
-      <button type="button" data-frame="11114">Frame 11114 (Central California)</button>
-      <button type="button" data-frame="36541">Frame 36541 (Tulare Lake, Ascending)</button>
-      <button type="button" data-frame="20693">Frame 20693 (Houston, Texas)</button>
-    </div>
-
     <div class="op-controls">
+      <div class="op-field">
+        <label for="op-disp-preset-select">Frame Preset</label>
+        <select id="op-disp-preset-select">
+          <option value="11114" selected>Frame 11114 (Central California)</option>
+          <option value="36541">Frame 36541 (Tulare Lake, Ascending)</option>
+          <option value="20693">Frame 20693 (Houston, Texas)</option>
+          <option value="custom">Custom</option>
+        </select>
+      </div>
       <div class="op-field">
         <label for="op-disp-frame">DISP-S1 Frame ID</label>
         <input type="number" id="op-disp-frame" value="11114" min="1" max="50000">
@@ -280,7 +288,7 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
         </div>
       </div>
       <div class="op-table-wrap">
-        <table>
+        <table class="op-table">
           <thead>
             <tr>
               <th>Frame</th>

@@ -1100,10 +1100,15 @@
     });
 
     // Wire Tab 1 controls
-    root.querySelectorAll("[data-preset]").forEach((btn) => {
-      btn.addEventListener("click", () => applyExplorerPreset(btn.dataset.preset));
+    $("op-preset-select").addEventListener("change", (e) => {
+      if (e.target.value !== "custom") applyExplorerPreset(e.target.value);
     });
+    const markCustomPreset = () => {
+      const sel = $("op-preset-select");
+      if (sel) sel.value = "custom";
+    };
     $("op-product").addEventListener("change", () => {
+      markCustomPreset();
       const prod = currentProductObj();
       if (prod) {
         $("op-band").value = prod.default_bands[0] || (prod.backend === "xarray" ? "displacement" : "");
@@ -1114,8 +1119,21 @@
       updateEquivalentCommands();
     });
     $("op-band").addEventListener("change", () => {
+      markCustomPreset();
       populatePresetsDropdown();
       updateLegend();
+      updateEquivalentCommands();
+    });
+    $("op-bbox").addEventListener("change", () => {
+      markCustomPreset();
+      updateEquivalentCommands();
+    });
+    $("op-start").addEventListener("change", () => {
+      markCustomPreset();
+      updateEquivalentCommands();
+    });
+    $("op-end").addEventListener("change", () => {
+      markCustomPreset();
       updateEquivalentCommands();
     });
     $("op-preset-expr").addEventListener("change", () => {
@@ -1163,44 +1181,42 @@
 
     // Wire Tab 2 (Bursts & DISP-S1 Parser)
     $("op-burst-input").value = SAMPLE_CSLC_LINES.join("\n");
-    $("op-load-cslc-sample").addEventListener("click", () => {
-      $("op-burst-input").value = SAMPLE_CSLC_LINES.join("\n");
-      runBurstParser();
-    });
-    $("op-load-disp-sample").addEventListener("click", () => {
-      $("op-burst-input").value = SAMPLE_DISP_LINES.join("\n");
+    $("op-burst-sample-select").addEventListener("change", (e) => {
+      $("op-burst-input").value =
+        e.target.value === "disp" ? SAMPLE_DISP_LINES.join("\n") : SAMPLE_CSLC_LINES.join("\n");
       runBurstParser();
     });
     $("op-parse-btn").addEventListener("click", runBurstParser);
 
     // Wire Tab 3 (Missing-Data Optimizer)
-    $("op-md-sample-12").addEventListener("click", () =>
-      loadMissingDataPreset(12, 10, [
-        [0, 2],
-        [0, 6],
-        [3, 4],
-        [7, 2],
-        [7, 8],
-        [10, 4],
-        [10, 8],
-      ])
-    );
-    $("op-md-sample-27").addEventListener("click", () =>
-      loadMissingDataPreset(27, 24, [
-        [0, 2],
-        [0, 7],
-        [0, 15],
-        [5, 4],
-        [5, 15],
-        [11, 7],
-        [11, 19],
-        [18, 11],
-        [18, 22],
-        [24, 2],
-        [24, 11],
-        [24, 22],
-      ])
-    );
+    $("op-md-sample-select").addEventListener("change", (e) => {
+      if (e.target.value === "27x24") {
+        loadMissingDataPreset(27, 24, [
+          [0, 2],
+          [0, 7],
+          [0, 15],
+          [5, 4],
+          [5, 15],
+          [11, 7],
+          [11, 19],
+          [18, 11],
+          [18, 22],
+          [24, 2],
+          [24, 11],
+          [24, 22],
+        ]);
+      } else {
+        loadMissingDataPreset(12, 10, [
+          [0, 2],
+          [0, 6],
+          [3, 4],
+          [7, 2],
+          [7, 8],
+          [10, 4],
+          [10, 8],
+        ]);
+      }
+    });
     $("op-md-random-gaps").addEventListener("click", () => {
       for (let k = 0; k < 3; k++) {
         const bi = Math.floor(Math.random() * mdState.burstIds.length);
@@ -1242,11 +1258,19 @@
     });
 
     // Wire Tab 4 (DISP-S1 Frame Search)
-    root.querySelectorAll("[data-frame]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        $("op-disp-frame").value = btn.dataset.frame;
+    $("op-disp-preset-select").addEventListener("change", (e) => {
+      if (e.target.value !== "custom") {
+        $("op-disp-frame").value = e.target.value;
         runDispSearch();
-      });
+      }
+    });
+    $("op-disp-frame").addEventListener("change", () => {
+      const val = $("op-disp-frame").value;
+      const sel = $("op-disp-preset-select");
+      if (sel) {
+        const hasOpt = Array.from(sel.options).some((o) => o.value === val);
+        sel.value = hasOpt ? val : "custom";
+      }
     });
     $("op-disp-search-btn").addEventListener("click", runDispSearch);
     $("op-disp-dl-urls").addEventListener("click", () => {
