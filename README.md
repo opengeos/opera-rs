@@ -9,7 +9,7 @@
 
 Pure-Rust, agent-centric toolkit for searching, visualizing, and analyzing [NASA OPERA](https://www.jpl.nasa.gov/go/opera) satellite products (DSWx-HLS, DSWx-S1, DIST-ALERT, DIST-ANN, RTC-S1, CSLC-S1, DISP-S1), powered by [`terrio`](https://github.com/opengeos/terrio), NASA's public CMR API, and [`titiler-cmr`](https://github.com/developmentseed/titiler-cmr) with **zero GDAL dependencies** (`--no-default-features` has zero C/C++ dependencies) and **no Earthdata login required**.
 
-**Documentation:** [Installation](https://opera-rs.opengeos.org/installation/) | [Notebooks](https://opera-rs.opengeos.org/notebooks/) | [CLI](https://opera-rs.opengeos.org/cli/) | [AI Agents (MCP)](https://opera-rs.opengeos.org/mcp/) | [Rust](https://opera-rs.opengeos.org/rust/) | [Python](https://opera-rs.opengeos.org/python/)
+**Documentation:** [Installation](https://opera-rs.opengeos.org/installation/) | [Notebooks](https://opera-rs.opengeos.org/notebooks/) | [CLI](https://opera-rs.opengeos.org/cli/) | [AI Agents (MCP)](https://opera-rs.opengeos.org/mcp/) | [Rust](https://opera-rs.opengeos.org/rust/) | [Python](https://opera-rs.opengeos.org/python/) | [Benchmarks](https://opera-rs.opengeos.org/benchmarks/)
 
 ## Highlights
 
@@ -127,6 +127,26 @@ change = opera_rs.detect_change(bbox, "2023-01-15", "2023-04-30", product="dswx-
 print("Open water delta (km^2):", change["open_water_delta_km2"])
 ```
 
+## Benchmarks (`opera-rs` vs Python `opera-utils` + `geopandas`)
+
+Measured on Linux x86_64 (Python 3.12, release build) against identical local cached `opera-adt/burst_db` v0.9.0 archives. See the full [Benchmarks](https://opera-rs.opengeos.org/benchmarks/) page and [`benchmarks/benchmark_opera_utils.py`](benchmarks/benchmark_opera_utils.py) to reproduce.
+
+| Benchmark | `opera-rs` | Python (`opera-utils` + `geopandas`) | Speedup / Savings |
+| --- | --- | --- | --- |
+| Installed footprint (wheel / `site-packages`) | **1 pkg / 38 MB** (0 GDAL deps) | 56 pkgs / 446 MB | **11.7x smaller** |
+| Python `import` (fresh process) | **27.6 ms** | 523.9 ms | **19.0x faster** |
+| CLI cold start (standalone `opera --help` vs `opera-utils --help`) | **3.2 ms** | 847.5 ms | **263x faster** |
+| `get_dates` x 10,000 CSLC filenames (Python API) | **5.3 ms** | 92.7 ms | **17.5x faster** |
+| `get_missing_data_options` (1,276 CSLCs, 27x48, Python API) | **48.4 ms** | 2,859.7 ms | **59.1x faster** |
+| End-to-end `missing-data` (1,276 CSLCs, all options, native binary) | **58.9 ms** | 3,799.5 ms (`python -c`) | **64.5x faster** |
+| `get_intersecting_frames` (46,986 frames, zip) | **174.1 ms** | 406.4 ms | **2.3x faster** |
+| Read aggregate AOI bounds from GeoPackage (500 polygons) | **2.3 ms** | 2.2 ms (`pyogrio`) / 4.0 ms (`geopandas`) | **1.0x to 1.7x** |
+
+## Interactive Notebooks
+
+- **Core OPERA Search, Analytics & Visualization:** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/opengeos/opera-rs/blob/main/examples/opera_rs_demo.ipynb) ([`examples/opera_rs_demo.ipynb`](examples/opera_rs_demo.ipynb))
+- **Sentinel-1 Bursts, DISP-S1 Frames & Missing-Data Optimization:** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/opengeos/opera-rs/blob/main/examples/opera_utils_demo.ipynb) ([`examples/opera_utils_demo.ipynb`](examples/opera_utils_demo.ipynb))
+
 ## Workspace Layout
 
 | Path | Description |
@@ -134,7 +154,8 @@ print("Open water delta (km^2):", change["open_water_delta_km2"])
 | `crates/opera-rs` | Pure-Rust core library (published to crates.io as `opera-rs`) |
 | `crates/opera-cli` | Standalone `opera` CLI and MCP server (published to crates.io as `opera-cli`) |
 | `python` | Python bindings (`opera-rs` on PyPI, PyO3) with bundled `opera` CLI and MCP server |
-| `examples` | Interactive Jupyter / Google Colab demo notebook (`opera_rs_demo.ipynb`) |
+| `benchmarks` | Reproducible benchmark script comparing `opera-rs` against `opera-utils` and `geopandas` |
+| `examples` | Interactive Jupyter / Google Colab demo notebooks (`opera_rs_demo.ipynb`, `opera_utils_demo.ipynb`) |
 | `docs` | Zensical documentation site (`opera-rs.opengeos.org`) and installer scripts |
 
 ## License

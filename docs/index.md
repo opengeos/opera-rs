@@ -8,7 +8,7 @@
 
 Pure-Rust, agent-centric toolkit for searching, visualizing, and analyzing [NASA OPERA](https://www.jpl.nasa.gov/go/opera) satellite products (DSWx-HLS, DSWx-S1, DIST-ALERT, DIST-ANN, RTC-S1, CSLC-S1, DISP-S1) via NASA's public CMR API, [`titiler-cmr`](https://github.com/developmentseed/titiler-cmr), and [`terrio`](https://github.com/opengeos/terrio), with **zero GDAL dependencies** (`--no-default-features` has zero C/C++ dependencies) and **no Earthdata login required**.
 
-Try `opera-rs` right now with zero local setup in the [Google Colab notebook](https://colab.research.google.com/github/opengeos/opera-rs/blob/main/examples/opera_rs_demo.ipynb), or browse the [Notebooks](notebooks.md) page.
+Try `opera-rs` right now with zero local setup in Google Colab: [Interactive Demo Notebook](https://colab.research.google.com/github/opengeos/opera-rs/blob/main/examples/opera_rs_demo.ipynb) | [Sentinel-1 Bursts & DISP-S1 Notebook](https://colab.research.google.com/github/opengeos/opera-rs/blob/main/examples/opera_utils_demo.ipynb), or browse the [Notebooks](notebooks.md) and [Benchmarks](benchmarks.md) pages.
 
 ## Key Capabilities
 
@@ -20,6 +20,7 @@ Try `opera-rs` right now with zero local setup in the [Google Colab notebook](ht
 | **Change Detection & Time Series** | Two-date before/after class-area deltas (`change` / `detect_change`) with Markdown reports and side-by-side PNG previews, plus multi-date OLS temporal trends (`timeseries` / `analyze_time_series`). | [Notebooks](notebooks.md) |
 | **Observed Flood-Extent Vectorization** | Union DSWx-HLS and cloud-penetrating DSWx-S1 water-only tiles, trace exterior rings with dry-land holes, and export RFC 7946 polygons to GeoJSON, GeoPackage, or Shapefile. | [Python API](python.md) |
 | **Pure-Rust Visualization** | Render PNG previews with legends and metric scale bars (`preview`), multi-date animated GIFs (`animate`), and self-contained interactive MapLibre GL JS HTML viewers (`export-html`). | [CLI Reference](cli.md) |
+| **Sentinel-1 Bursts, DISP-S1 Frames & Missing Data** | Pure-Rust `opera-utils` integration: burst ID/date parsing, `opera-adt/burst_db` v0.9.0 frame lookups and intersections, optimal missing-data subset selection, and DISP-S1 CMR frame search (**up to 59x faster in Python, 64x via subprocess**). | [Benchmarks](benchmarks.md) |
 | **AI Agents & MCP Server** | Pure-Rust Model Context Protocol server (`opera mcp` or `uvx --from opera-rs opera mcp`) for Claude Code, Claude Desktop, Cursor, and VS Code with automatic tool exposure, inline PNG previews, `--json-usage`, and 4 workflow prompts. | [AI Agents (MCP)](mcp.md) |
 | **Pure-Rust Local Geo I/O** | Read AOI vectors, write GeoJSON/GeoPackage/Shapefile outputs, and inspect local OPERA GeoTIFFs/COGs on disk via `terrio` with zero GDAL dependencies. | [Rust Library](rust.md) |
 
@@ -104,6 +105,6 @@ Try `opera-rs` right now with zero local setup in the [Google Colab notebook](ht
 
 ## Three Interfaces, One Pure-Rust Core
 
-- **[Standalone CLI & MCP Server (`opera-cli`)](cli.md):** Single prebuilt binary for Linux, macOS, and Windows with 13 NASA OPERA subcommands, `--json` / `--json-usage`, and the `opera mcp` server.
+- **[Standalone CLI & MCP Server (`opera-cli`)](cli.md):** Single prebuilt binary for Linux, macOS, and Windows with 18 NASA OPERA subcommands, `--json` / `--json-usage`, and the `opera mcp` server.
 - **[Rust Library (`opera-rs`)](rust.md):** Core crate on crates.io with modular `http`, `geo`, and `parallel` feature flags (`--no-default-features` compiles with zero C/C++ dependencies).
 - **[Python Package (`opera-rs`)](python.md):** Prebuilt PyO3 ABI3 wheels on PyPI (Python 3.11+, zero mandatory Python dependencies) bundling both the Python API and the `opera` CLI/MCP server.
