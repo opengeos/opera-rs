@@ -70,7 +70,7 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
 
     <div class="op-summary" id="op-explorer-summary" hidden></div>
 
-    <div class="op-map-grid">
+    <div class="op-explorer-stack">
       <div class="op-map-card">
         <div class="op-map-toolbar">
           <span class="op-hint" id="op-map-hint">Click Search &amp; Render to load live NASA CMR footprints and titiler-cmr tiles. Click anywhere on the map to sample pixel values.</span>
@@ -90,20 +90,25 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
           <button type="button" id="op-stats-btn" class="op-icon-btn" disabled>Compute Stats</button>
         </div>
         <p class="op-hint" id="op-stats-note">Computes live zonal statistics from <code>titiler-cmr</code> and calculates 30 m class areas (km<sup>2</sup>) in Rust WebAssembly.</p>
-        <canvas id="op-stats-chart" width="440" height="220"></canvas>
-        <div id="op-stats-table-wrap" class="op-mini-table-wrap" hidden>
-          <table class="op-table">
-            <thead>
-              <tr><th>Class / Metric</th><th>Pixels</th><th>%</th><th>Area (km<sup>2</sup>)</th></tr>
-            </thead>
-            <tbody id="op-stats-tbody"></tbody>
-          </table>
+        <div class="op-stats-grid">
+          <div>
+            <canvas id="op-stats-chart" width="520" height="220"></canvas>
+          </div>
+          <div>
+            <div id="op-stats-table-wrap" class="op-mini-table-wrap" hidden>
+              <table class="op-table">
+                <thead>
+                  <tr><th>Class / Metric</th><th>Pixels</th><th>%</th><th>Area (km<sup>2</sup>)</th></tr>
+                </thead>
+                <tbody id="op-stats-tbody"></tbody>
+              </table>
+            </div>
+            <details class="op-code-details" open>
+              <summary>Equivalent CLI &amp; Python Commands</summary>
+              <pre><code id="op-equiv-cmd"></code></pre>
+            </details>
+          </div>
         </div>
-
-        <details class="op-code-details" open>
-          <summary>Equivalent CLI &amp; Python Commands</summary>
-          <pre><code id="op-equiv-cmd"></code></pre>
-        </details>
       </div>
     </div>
 
