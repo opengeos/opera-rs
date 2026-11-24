@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use opera-rs in your work, please cite this software."
 title: "opera-rs: Pure-Rust, agent-centric toolkit for searching, visualizing, and analyzing NASA OPERA satellite data"
 type: software
-version: "0.1.0"
+version: "0.2.0"
 date-released: "2026-11-23"
 license: MIT
 repository-code: "https://github.com/opengeos/opera-rs"
