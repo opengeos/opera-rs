@@ -15,6 +15,7 @@ nav = [
   { "AI Agents (MCP)" = "mcp.md" },
   { "Rust Library" = "rust.md" },
   { "Python API" = "python.md" },
+  { "Benchmarks" = "benchmarks.md" },
   { "Report Issues" = "https://github.com/opengeos/opera-rs/issues" },
 ]
 
