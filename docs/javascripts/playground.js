@@ -530,6 +530,7 @@
     updateLegend();
     const unpinBtn = $("op-unpin-btn");
     if (unpinBtn) unpinBtn.hidden = !pinnedGranuleUr;
+    if ($("op-stats-btn")) $("op-stats-btn").disabled = false;
     const hint = $("op-map-hint");
     if (hint) {
       hint.textContent = pinnedGranuleUr
@@ -541,6 +542,11 @@
   function invalidateCommittedSearch() {
     renderGen++;
     pointReqGen++;
+    if (activeAbort) {
+      activeAbort.abort();
+      activeAbort = null;
+      if ($("op-search-btn")) $("op-search-btn").disabled = false;
+    }
     if (statsAbort) {
       statsAbort.abort();
       statsAbort = null;
@@ -555,15 +561,13 @@
 
   async function runExplorerSearch() {
     if (!wasmMod) return;
-    if (activeAbort) activeAbort.abort();
+    invalidateCommittedSearch();
     const controller = new AbortController();
     activeAbort = controller;
     const signal = controller.signal;
 
     const btn = $("op-search-btn");
     btn.disabled = true;
-    pinnedGranuleUr = null;
-    $("op-point-box").hidden = true;
     updateEquivalentCommands();
 
     try {
@@ -802,7 +806,17 @@
       const items = await resp.json();
       if (myGeoGen !== geocodeReqGen) return;
       if (!items.length || !items[0].boundingbox) throw new Error("No matching place found");
-      const [s, n, w, e] = items[0].boundingbox.map(Number);
+      let [s, n, w, e] = items[0].boundingbox.map(Number);
+      if (w >= e) {
+        const cx = (w + e) / 2;
+        w = Math.max(-180, cx - 0.05);
+        e = Math.min(180, cx + 0.05);
+      }
+      if (s >= n) {
+        const cy = (s + n) / 2;
+        s = Math.max(-90, cy - 0.05);
+        n = Math.min(90, cy + 0.05);
+      }
       $("op-bbox").value = `${w.toFixed(4)},${s.toFixed(4)},${e.toFixed(4)},${n.toFixed(4)}`;
       if ($("op-preset-select")) $("op-preset-select").value = "custom";
       updateEquivalentCommands();
