@@ -312,6 +312,8 @@
       zoom: 9,
     });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
+    map.addControl(new maplibregl.FullscreenControl(), "top-right");
+    map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: "metric" }), "bottom-left");
     await new Promise((resolve) => {
       if (map.loaded()) resolve();
       else map.once("load", resolve);
