@@ -7,7 +7,9 @@
   const SITE_ROOT = new URL("../", SCRIPT_SRC);
   const WASM_URL = new URL("wasm/opera_js.js", SITE_ROOT).href;
   const MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@5.1.0/dist/maplibre-gl.css";
+  const MAPLIBRE_CSS_SRI = "sha384-Nq6PQ+9vJPvw7U/VfDELyrWoGQMsy0gi6QShhaSrGzkpF5KkM40csg2leky+YMTd";
   const MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@5.1.0/dist/maplibre-gl.js";
+  const MAPLIBRE_JS_SRI = "sha384-TVqWxbDHWILsUUzJNOvfZ9KwUw3sPdYRiGed9YeAkFlxMjTG8vRl2HDuYAsTh11I";
 
   const EXPLORER_PRESETS = {
     tulare: {
@@ -73,6 +75,7 @@
 
   let wasmPromise = null;
   let maplibrePromise = null;
+  let mapInitPromise = null;
   let wasmMod = null;
   let catalog = [];
   let map = null;
@@ -83,6 +86,12 @@
   let lastDispResult = null;
   let activeAbort = null;
   let dispAbort = null;
+  let statsAbort = null;
+  let geocodeAbort = null;
+  let renderGen = 0;
+  let pointReqGen = 0;
+  let statsReqGen = 0;
+  let geocodeReqGen = 0;
 
   // Missing-data interactive state
   let mdState = {
@@ -113,13 +122,21 @@
           const link = document.createElement("link");
           link.rel = "stylesheet";
           link.href = MAPLIBRE_CSS;
+          link.integrity = MAPLIBRE_CSS_SRI;
+          link.crossOrigin = "anonymous";
           document.head.appendChild(link);
         }
         const script = document.createElement("script");
         script.src = MAPLIBRE_JS;
+        script.integrity = MAPLIBRE_JS_SRI;
+        script.crossOrigin = "anonymous";
         script.async = true;
         script.onload = () => resolve(window.maplibregl);
-        script.onerror = () => reject(new Error("Failed to load MapLibre GL JS from CDN"));
+        script.onerror = () => {
+          script.remove();
+          maplibrePromise = null;
+          reject(new Error("Failed to load MapLibre GL JS from CDN"));
+        };
         document.head.appendChild(script);
       });
     }
@@ -254,7 +271,7 @@
     const codeEl = $("op-equiv-cmd");
     if (!codeEl) return;
     const prod = currentProductObj();
-    const alias = (prod && prod.aliases && prod.aliases[0]) || (prod ? prod.short_name : "dswx-hls");
+    const alias = prod ? prod.short_title.toLowerCase() : "dswx-hls";
     const bboxStr = ($("op-bbox").value || "").trim();
     const start = $("op-start").value;
     const end = $("op-end").value;
@@ -289,102 +306,117 @@
     codeEl.textContent = `# CLI\n${cliParts.join(" ")}\n${previewParts.join(" ")}\n\n# Python\n${pyCode}`;
   }
 
-  async function ensureMap() {
-    if (map) return map;
+  function ensureMap() {
+    if (map && mapReady) return Promise.resolve(map);
+    if (mapInitPromise) return mapInitPromise;
     const container = $("op-map");
-    if (!container) return null;
-    const maplibregl = await loadMapLibre();
-    map = new maplibregl.Map({
-      container,
-      style: {
-        version: 8,
-        sources: {
-          osm: {
-            type: "raster",
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-            tileSize: 256,
-            attribution: "&copy; OpenStreetMap contributors",
+    if (!container) return Promise.resolve(null);
+    mapInitPromise = (async () => {
+      const maplibregl = await loadMapLibre();
+      const instance = new maplibregl.Map({
+        container,
+        style: {
+          version: 8,
+          sources: {
+            osm: {
+              type: "raster",
+              tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+              tileSize: 256,
+              attribution: "&copy; OpenStreetMap contributors",
+            },
+            esri_imagery: {
+              type: "raster",
+              tiles: [
+                "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+              ],
+              tileSize: 256,
+              attribution: "Tiles &copy; Esri",
+            },
           },
-          esri_imagery: {
-            type: "raster",
-            tiles: [
-              "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-            ],
-            tileSize: 256,
-            attribution: "Tiles &copy; Esri",
-          },
+          layers: [
+            { id: "osm-base", type: "raster", source: "osm" },
+            {
+              id: "esri-imagery-base",
+              type: "raster",
+              source: "esri_imagery",
+              layout: { visibility: "none" },
+            },
+          ],
         },
-        layers: [
-          { id: "osm-base", type: "raster", source: "osm" },
-          {
-            id: "esri-imagery-base",
-            type: "raster",
-            source: "esri_imagery",
-            layout: { visibility: "none" },
-          },
-        ],
-      },
-      center: [-119.7, 36.05],
-      zoom: 9,
-    });
-    map.addControl(new maplibregl.NavigationControl(), "top-right");
-    map.addControl(new maplibregl.FullscreenControl(), "top-right");
-    map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: "metric" }), "bottom-left");
-    await new Promise((resolve) => {
-      if (map.loaded()) resolve();
-      else map.once("load", resolve);
-    });
-    mapReady = true;
+        center: [-119.7, 36.05],
+        zoom: 9,
+      });
+      map = instance;
+      instance.addControl(new maplibregl.NavigationControl(), "top-right");
+      instance.addControl(new maplibregl.FullscreenControl(), "top-right");
+      instance.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: "metric" }), "bottom-left");
+      await new Promise((resolve) => {
+        if (instance.loaded()) resolve();
+        else instance.once("load", resolve);
+      });
+      if (map !== instance) return null;
+      mapReady = true;
 
-    map.on("click", async (ev) => {
-      if (!lastTitiler || !wasmMod || !lastSearch || !lastSearch.concept_id) return;
-      const { lng, lat } = ev.lngLat;
-      const box = $("op-point-box");
-      if (!box) return;
-      box.hidden = false;
-      box.textContent = `Sampling (${lng.toFixed(4)}, ${lat.toFixed(4)}) via titiler-cmr...`;
-      try {
-        const prod = currentProductObj();
-        const band = ($("op-band").value || "").trim() || null;
-        const expr = $("op-preset-expr").value || null;
-        const temporal = pinnedGranuleUr ? null : buildTemporalRange();
-        const url = wasmMod.build_point_url_js(
-          lastSearch.concept_id,
-          prod.short_name,
-          prod.backend,
-          pinnedGranuleUr,
-          temporal,
-          band,
-          expr,
-          lng,
-          lat,
-          null
-        );
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const text = await resp.text();
-        const parsed = JSON.parse(
-          wasmMod.parse_point_response_json(text, prod.short_name, band)
-        );
-        const summary = (parsed.assets || [])
-          .map((a) => {
-            const vals = (a.values || [])
-              .map((v, idx) => {
-                const lbl = a.class_labels && a.class_labels[idx];
-                const vStr = v === null || v === undefined ? "nodata" : Number(v).toFixed(3).replace(/\.000$/, "");
-                return lbl ? `${vStr} (${lbl})` : vStr;
-              })
-              .join(", ");
-            return `${a.name}: ${vals || "nodata"}`;
-          })
-          .join(" | ");
-        box.textContent = `Point (${lng.toFixed(4)}, ${lat.toFixed(4)}): ${summary || "no valid pixels"}`;
-      } catch (e) {
-        box.textContent = `Point (${lng.toFixed(4)}, ${lat.toFixed(4)}): ${errMsg(e)}`;
-      }
-    });
+      instance.on("click", async (ev) => {
+        if (!lastTitiler || !wasmMod || !lastSearch || !lastSearch.concept_id) return;
+        const { lng, lat } = ev.lngLat;
+        const box = $("op-point-box");
+        if (!box) return;
+        const myRenderGen = renderGen;
+        const myPointGen = ++pointReqGen;
+        const committed = lastSearch.committed;
+        const band = lastTitiler.activeBand;
+        const expr = lastTitiler.activeExpr;
+        const pinned = lastTitiler.activePinnedUr;
+        const temporal = pinned ? null : committed.temporal;
 
-    return map;
+        box.hidden = false;
+        box.textContent = `Sampling (${lng.toFixed(4)}, ${lat.toFixed(4)}) via titiler-cmr...`;
+        try {
+          const url = wasmMod.build_point_url_js(
+            lastSearch.concept_id,
+            committed.product.short_name,
+            committed.product.backend,
+            pinned,
+            temporal,
+            band,
+            expr,
+            lng,
+            lat,
+            null
+          );
+          const resp = await fetch(url);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const text = await resp.text();
+          if (myRenderGen !== renderGen || myPointGen !== pointReqGen) return;
+          const parsed = JSON.parse(
+            wasmMod.parse_point_response_json(text, committed.product.short_name, band)
+          );
+          const summary = (parsed.assets || [])
+            .map((a) => {
+              const vals = (a.values || [])
+                .map((v, idx) => {
+                  const lbl = a.class_labels && a.class_labels[idx];
+                  const vStr = v === null || v === undefined ? "nodata" : Number(v).toFixed(3).replace(/\.000$/, "");
+                  return lbl ? `${vStr} (${lbl})` : vStr;
+                })
+                .join(", ");
+              return `${a.name}: ${vals || "nodata"}`;
+            })
+            .join(" | ");
+          box.textContent = `Point (${lng.toFixed(4)}, ${lat.toFixed(4)}): ${summary || "no valid pixels"}`;
+        } catch (e) {
+          if (myRenderGen !== renderGen || myPointGen !== pointReqGen) return;
+          box.textContent = `Point (${lng.toFixed(4)}, ${lat.toFixed(4)}): ${errMsg(e)}`;
+        }
+      });
+
+      return instance;
+    })().catch((e) => {
+      mapInitPromise = null;
+      throw e;
+    });
+    return mapInitPromise;
   }
 
   function buildTemporalRange() {
@@ -457,15 +489,23 @@
   }
 
   function applyTileLayerFromState() {
-    if (!wasmMod || !lastSearch || !lastSearch.concept_id) return;
-    const prod = currentProductObj();
+    if (!wasmMod || !lastSearch || !lastSearch.concept_id || !lastSearch.committed) return;
+    const committed = lastSearch.committed;
+    const prod = committed.product;
     const band = ($("op-band").value || "").trim() || null;
     const exprSel = $("op-preset-expr");
     const expr = exprSel.value || null;
     const opt = exprSel.selectedOptions && exprSel.selectedOptions[0];
     const rescale = opt && opt.dataset ? opt.dataset.rescale || null : null;
     const waterOnly = $("op-water-only").checked;
-    const temporal = pinnedGranuleUr ? null : buildTemporalRange();
+    const temporal = pinnedGranuleUr ? null : committed.temporal;
+
+    renderGen++;
+    pointReqGen++;
+    if (statsAbort) {
+      statsAbort.abort();
+      statsAbort = null;
+    }
 
     lastTitiler = JSON.parse(
       wasmMod.build_titiler_urls_json(
@@ -482,8 +522,11 @@
         256
       )
     );
-    const bbox = parseBBoxInput($("op-bbox").value);
-    updateMapOverlay(bbox, lastSearch.feature_collection, lastTitiler.tile_url_template);
+    lastTitiler.activeBand = band;
+    lastTitiler.activeExpr = expr;
+    lastTitiler.activePinnedUr = pinnedGranuleUr;
+
+    updateMapOverlay(committed.bbox, lastSearch.feature_collection, lastTitiler.tile_url_template);
     updateLegend();
     const unpinBtn = $("op-unpin-btn");
     if (unpinBtn) unpinBtn.hidden = !pinnedGranuleUr;
@@ -495,11 +538,27 @@
     }
   }
 
+  function invalidateCommittedSearch() {
+    renderGen++;
+    pointReqGen++;
+    if (statsAbort) {
+      statsAbort.abort();
+      statsAbort = null;
+    }
+    lastSearch = null;
+    lastTitiler = null;
+    pinnedGranuleUr = null;
+    if ($("op-stats-btn")) $("op-stats-btn").disabled = true;
+    if ($("op-point-box")) $("op-point-box").hidden = true;
+    if ($("op-unpin-btn")) $("op-unpin-btn").hidden = true;
+  }
+
   async function runExplorerSearch() {
     if (!wasmMod) return;
     if (activeAbort) activeAbort.abort();
-    activeAbort = new AbortController();
-    const signal = activeAbort.signal;
+    const controller = new AbortController();
+    activeAbort = controller;
+    const signal = controller.signal;
 
     const btn = $("op-search-btn");
     btn.disabled = true;
@@ -512,6 +571,7 @@
       const bbox = parseBBoxInput($("op-bbox").value);
       const start = $("op-start").value || null;
       const end = $("op-end").value || null;
+      const temporal = buildTemporalRange();
       const dedup = $("op-dedup").checked;
 
       setStatus(`Querying NASA CMR for ${prod.short_name}...`);
@@ -529,8 +589,10 @@
       const resp = await fetch(cmrUrl, { signal });
       if (!resp.ok) throw new Error(`CMR returned HTTP ${resp.status}`);
       const body = await resp.text();
+      if (activeAbort !== controller) return;
       const tWasm0 = performance.now();
       lastSearch = JSON.parse(wasmMod.parse_cmr_page_json(body, prod.short_name, dedup, false));
+      lastSearch.committed = { product: prod, bbox, start, end, temporal };
       const wasmMs = performance.now() - tWasm0;
       const totalMs = performance.now() - t0;
 
@@ -566,6 +628,7 @@
       $("op-granules-section").hidden = false;
 
       await ensureMap();
+      if (activeAbort !== controller) return;
       if (lastSearch.concept_id) {
         applyTileLayerFromState();
         $("op-stats-btn").disabled = false;
@@ -573,15 +636,21 @@
           `Loaded ${lastSearch.granules.length} granules (${lastSearch.hits} CMR hits) in ${totalMs.toFixed(0)} ms (WASM parse: ${wasmMs.toFixed(1)} ms).`
         );
       } else {
+        renderGen++;
+        lastTitiler = null;
         updateMapOverlay(bbox, lastSearch.feature_collection, null);
         $("op-stats-btn").disabled = true;
         setStatus(`Found ${lastSearch.granules.length} granules, but no collection concept_id for tiling.`);
       }
     } catch (e) {
       if (e && e.name === "AbortError") return;
-      setStatus(`Search failed: ${errMsg(e)}`, true);
+      if (activeAbort === controller) {
+        setStatus(`Search failed: ${errMsg(e)}`, true);
+      }
     } finally {
-      btn.disabled = false;
+      if (activeAbort === controller) {
+        btn.disabled = false;
+      }
     }
   }
 
@@ -593,6 +662,10 @@
     const h = canvas.height;
     ctx.clearRect(0, 0, w, h);
 
+    const tbody = $("op-stats-tbody");
+    clearEl(tbody);
+    $("op-stats-table-wrap").hidden = true;
+
     const bands = Object.entries(statsObj.bands || {});
     if (!bands.length) {
       ctx.fillStyle = "#6b7280";
@@ -603,8 +676,6 @@
 
     const [, bandStats] = bands[0];
     const breakdown = bandStats.class_breakdown || [];
-    const tbody = $("op-stats-tbody");
-    clearEl(tbody);
 
     const fgColor = getComputedStyle(document.body).color || "#374151";
 
@@ -672,49 +743,73 @@
   }
 
   async function computeZonalStats() {
-    if (!wasmMod || !lastTitiler) return;
+    if (!wasmMod || !lastTitiler || !lastSearch || !lastSearch.committed) return;
+    if (statsAbort) statsAbort.abort();
+    const controller = new AbortController();
+    statsAbort = controller;
+
+    const myRenderGen = renderGen;
+    const myStatsGen = ++statsReqGen;
+    const statsUrl = lastTitiler.statistics_url;
+    const categorical = lastTitiler.categorical;
+    const band = lastTitiler.activeBand;
+    const prodShort = lastSearch.committed.product.short_name;
+    const bbox = lastSearch.committed.bbox;
+
     const btn = $("op-stats-btn");
     btn.disabled = true;
     $("op-stats-note").textContent = "Computing live zonal statistics via titiler-cmr...";
     try {
-      const bbox = parseBBoxInput($("op-bbox").value);
-      const prod = currentProductObj();
-      const band = ($("op-band").value || "").trim() || null;
       const t0 = performance.now();
-      const resp = await fetch(lastTitiler.statistics_url, {
+      const resp = await fetch(statsUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(bboxToPolygonGeoJson(bbox)),
+        signal: controller.signal,
       });
       if (!resp.ok) throw new Error(`titiler-cmr returned HTTP ${resp.status}`);
       const text = await resp.text();
+      if (myRenderGen !== renderGen || myStatsGen !== statsReqGen) return;
       const parsed = JSON.parse(
-        wasmMod.parse_statistics_response_json(text, prod.short_name, band, lastTitiler.categorical)
+        wasmMod.parse_statistics_response_json(text, prodShort, band, categorical)
       );
       renderStatsChart(parsed);
       $("op-stats-note").textContent = `Computed in ${(performance.now() - t0).toFixed(0)} ms (30 m pixel areas calculated in Rust WASM).`;
     } catch (e) {
+      if (e && e.name === "AbortError") return;
+      if (myRenderGen !== renderGen || myStatsGen !== statsReqGen) return;
       $("op-stats-note").textContent = `Statistics failed: ${errMsg(e)}`;
     } finally {
-      btn.disabled = false;
+      if (myRenderGen === renderGen && myStatsGen === statsReqGen && lastTitiler) {
+        btn.disabled = false;
+      }
     }
   }
 
   async function geocodePlace() {
     const q = ($("op-place").value || "").trim();
     if (!q) return;
+    if (geocodeAbort) geocodeAbort.abort();
+    const controller = new AbortController();
+    geocodeAbort = controller;
+    const myGeoGen = ++geocodeReqGen;
+
     setStatus(`Geocoding "${q}" via Nominatim...`);
     try {
       const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=jsonv2&limit=1`;
-      const resp = await fetch(url);
+      const resp = await fetch(url, { signal: controller.signal });
       if (!resp.ok) throw new Error(`Nominatim HTTP ${resp.status}`);
       const items = await resp.json();
+      if (myGeoGen !== geocodeReqGen) return;
       if (!items.length || !items[0].boundingbox) throw new Error("No matching place found");
       const [s, n, w, e] = items[0].boundingbox.map(Number);
       $("op-bbox").value = `${w.toFixed(4)},${s.toFixed(4)},${e.toFixed(4)},${n.toFixed(4)}`;
+      if ($("op-preset-select")) $("op-preset-select").value = "custom";
       updateEquivalentCommands();
       setStatus(`Geocoded "${items[0].display_name}". Click Search & Render to query CMR.`);
     } catch (e) {
+      if (e && e.name === "AbortError") return;
+      if (myGeoGen !== geocodeReqGen) return;
       setStatus(`Geocode failed: ${errMsg(e)}`, true);
     }
   }
@@ -760,7 +855,7 @@
             kind,
             c.burst_id,
             dates.join(", "),
-            `${c.polarization || "-"} / ${c.product_version || "-"}`,
+            `${c.polarization || "-"} / ${c.version || "-"}`,
             c.frame_id ? `frame F${c.frame_id}` : c.sensor || "burst match",
           ];
           okCount++;
@@ -966,7 +1061,8 @@
   async function runDispSearch() {
     if (!wasmMod) return;
     if (dispAbort) dispAbort.abort();
-    dispAbort = new AbortController();
+    const controller = new AbortController();
+    dispAbort = controller;
 
     const btn = $("op-disp-search-btn");
     btn.disabled = true;
@@ -993,9 +1089,10 @@
         limit
       );
       const t0 = performance.now();
-      const resp = await fetch(cmrUrl, { signal: dispAbort.signal });
+      const resp = await fetch(cmrUrl, { signal: controller.signal });
       if (!resp.ok) throw new Error(`CMR returned HTTP ${resp.status}`);
       const body = await resp.text();
+      if (dispAbort !== controller) return;
       const tWasm0 = performance.now();
       lastDispResult = JSON.parse(wasmMod.parse_disp_cmr_page_json(body, urlType, dedup));
       const wasmMs = performance.now() - tWasm0;
@@ -1045,9 +1142,13 @@
       );
     } catch (e) {
       if (e && e.name === "AbortError") return;
-      setStatus(`DISP-S1 search failed: ${errMsg(e)}`, true);
+      if (dispAbort === controller) {
+        setStatus(`DISP-S1 search failed: ${errMsg(e)}`, true);
+      }
     } finally {
-      btn.disabled = false;
+      if (dispAbort === controller) {
+        btn.disabled = false;
+      }
     }
   }
 
@@ -1068,6 +1169,10 @@
   }
 
   function teardown() {
+    renderGen++;
+    pointReqGen++;
+    statsReqGen++;
+    geocodeReqGen++;
     if (activeAbort) {
       activeAbort.abort();
       activeAbort = null;
@@ -1076,6 +1181,15 @@
       dispAbort.abort();
       dispAbort = null;
     }
+    if (statsAbort) {
+      statsAbort.abort();
+      statsAbort = null;
+    }
+    if (geocodeAbort) {
+      geocodeAbort.abort();
+      geocodeAbort = null;
+    }
+    mapInitPromise = null;
     if (map) {
       map.remove();
       map = null;
@@ -1127,6 +1241,7 @@
     };
     $("op-product").addEventListener("change", () => {
       markCustomPreset();
+      invalidateCommittedSearch();
       const prod = currentProductObj();
       if (prod) {
         $("op-band").value = prod.default_bands[0] || (prod.backend === "xarray" ? "displacement" : "");

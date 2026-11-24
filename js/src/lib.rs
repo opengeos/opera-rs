@@ -74,10 +74,8 @@ pub fn find_product_json(query: &str) -> Result<String, JsValue> {
 
 #[wasm_bindgen]
 pub fn expression_presets_json(product: &str, band: &str) -> Result<String, JsValue> {
-    let prod = find_product(product)
-        .map(|p| p.short_name)
-        .unwrap_or_else(|_| product.to_string());
-    to_json_string(&expression_presets(&prod, band))
+    let prod = find_product(product).map_err(to_js_err)?;
+    to_json_string(&expression_presets(&prod.short_name, band))
 }
 
 #[wasm_bindgen]
@@ -86,11 +84,9 @@ pub fn legend_entries_json(
     band: Option<String>,
     water_only: bool,
 ) -> Result<String, JsValue> {
-    let prod = find_product(product)
-        .map(|p| p.short_name)
-        .unwrap_or_else(|_| product.to_string());
+    let prod = find_product(product).map_err(to_js_err)?;
     let b = clean_opt(band);
-    let entries: Vec<Value> = legend_entries(&prod, b.as_deref(), water_only)
+    let entries: Vec<Value> = legend_entries(&prod.short_name, b.as_deref(), water_only)
         .into_iter()
         .map(|(label, rgba)| {
             json!({
@@ -138,17 +134,16 @@ pub fn parse_cmr_page_json(
     deduplicate_versions: bool,
     newest_per_tile: bool,
 ) -> Result<String, JsValue> {
-    let prod = find_product(product)
-        .map(|p| p.short_name)
-        .unwrap_or_else(|_| product.to_string());
-    let (hits, mut granules) = parse_granule_page_json(body, &prod).map_err(to_js_err)?;
+    let prod = find_product(product).map_err(to_js_err)?;
+    let (hits, mut granules) =
+        parse_granule_page_json(body, &prod.short_name).map_err(to_js_err)?;
     if deduplicate_versions {
         granules = deduplicate_latest_versions(granules);
     }
     if newest_per_tile {
         granules = keep_newest_per_tile(granules);
     }
-    let result = assemble_search_result(&prod, hits, granules);
+    let result = assemble_search_result(&prod.short_name, hits, granules);
     to_json_string(&result)
 }
 
@@ -287,11 +282,10 @@ pub fn parse_point_response_json(
     product: &str,
     band: Option<String>,
 ) -> Result<String, JsValue> {
-    let prod = find_product(product)
-        .map(|p| p.short_name)
-        .unwrap_or_else(|_| product.to_string());
+    let prod = find_product(product).map_err(to_js_err)?;
     let b = clean_opt(band);
-    let parsed = parse_point_response(body, Some(&prod), b.as_deref()).map_err(to_js_err)?;
+    let parsed =
+        parse_point_response(body, Some(&prod.short_name), b.as_deref()).map_err(to_js_err)?;
     to_json_string(&parsed)
 }
 
@@ -302,11 +296,9 @@ pub fn parse_statistics_response_json(
     band: Option<String>,
     categorical: bool,
 ) -> Result<String, JsValue> {
-    let prod = find_product(product)
-        .map(|p| p.short_name)
-        .unwrap_or_else(|_| product.to_string());
+    let prod = find_product(product).map_err(to_js_err)?;
     let b = clean_opt(band);
-    let parsed = parse_statistics_response(body, Some(&prod), b.as_deref(), categorical)
+    let parsed = parse_statistics_response(body, Some(&prod.short_name), b.as_deref(), categorical)
         .map_err(to_js_err)?;
     to_json_string(&parsed)
 }
@@ -409,7 +401,7 @@ pub fn build_disp_search_url_js(
     if let Some(ver) = clean_opt(product_version) {
         url.push_str(&format!(
             "&attribute[]={}",
-            url_encode(&format!("string,PRODUCT_VERSION,{ver}"))
+            url_encode(&format!("float,PRODUCT_VERSION,{ver}"))
         ));
     }
     if let Some(b) = bbox {
@@ -466,7 +458,10 @@ pub fn parse_disp_cmr_page_json(
         .ok_or_else(|| to_js_err("CMR response missing 'items' array"))?;
     let mut products = Vec::new();
     for item in items {
-        if let Ok(prod) = DispProduct::from_umm(item, parsed_url_type) {
+        let Some(umm) = item.get("umm") else {
+            continue;
+        };
+        if let Ok(prod) = DispProduct::from_umm(umm, parsed_url_type) {
             products.push(prod);
         }
     }
