@@ -94,21 +94,22 @@ Explore **`opera-rs`** directly in your browser via **WebAssembly** (`opera-js`,
           <div>
             <canvas id="op-stats-chart" width="520" height="220"></canvas>
           </div>
-          <div>
-            <div id="op-stats-table-wrap" class="op-mini-table-wrap" hidden>
-              <table class="op-table">
-                <thead>
-                  <tr><th>Class / Metric</th><th>Pixels</th><th>%</th><th>Area (km<sup>2</sup>)</th></tr>
-                </thead>
-                <tbody id="op-stats-tbody"></tbody>
-              </table>
-            </div>
-            <details class="op-code-details" open>
-              <summary>Equivalent CLI &amp; Python Commands</summary>
-              <pre><code id="op-equiv-cmd"></code></pre>
-            </details>
+          <div id="op-stats-table-wrap" class="op-mini-table-wrap" hidden>
+            <table class="op-table">
+              <thead>
+                <tr><th>Class / Metric</th><th>Pixels</th><th>%</th><th>Area (km<sup>2</sup>)</th></tr>
+              </thead>
+              <tbody id="op-stats-tbody"></tbody>
+            </table>
           </div>
         </div>
+      </div>
+
+      <div class="op-side-card">
+        <details class="op-code-details" open>
+          <summary>Equivalent CLI &amp; Python Commands</summary>
+          <pre><code id="op-equiv-cmd"></code></pre>
+        </details>
       </div>
     </div>
 
