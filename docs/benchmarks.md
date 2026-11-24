@@ -16,8 +16,12 @@ This page compares `opera-rs` against the upstream Python [`opera-utils`](https:
 - **Reproduce locally:** Run [`benchmarks/benchmark_opera_utils.py`](https://github.com/opengeos/opera-rs/blob/main/benchmarks/benchmark_opera_utils.py) (requires `opera-rs >= 0.2.0` or a local build from `main`):
 
 ```sh
+# 1. Benchmark Python API + PyPI-bundled opera CLI shim
 pip install "opera-rs>=0.2.0" "opera-utils[disp]" geopandas shapely
 python benchmarks/benchmark_opera_utils.py
+
+# 2. Reproduce standalone native Rust CLI column (after installing via install.sh / cargo install opera-cli)
+python benchmarks/benchmark_opera_utils.py --opera-bin "$(command -v opera)"
 ```
 
 ## 1. Installation & Dependency Footprint
@@ -65,28 +69,28 @@ Single-call uncached lookups against the official `opera-adt/burst_db` v0.9.0 re
 | `get_frame_geojson` (3 of 46,986 frames, `frame-geometries-simple.geojson.zip`) | **138.1 ms** | 188.8 ms | **1.4x** |
 | `get_intersecting_frames` (Tulare Lake bbox across all 46,986 frames) | **174.1 ms** | 406.4 ms | **2.3x** |
 
-## 5. End-to-End CLI Workflows (Scripts & AI Agent MCP Calls)
+## 5. End-to-End Subprocess Workflows (Scripts & AI Agent MCP Calls)
 
-Wall-clock latency of complete CLI invocations from cold process start to JSON/text output:
+Wall-clock latency of fresh subprocess runs from cold start. Frame bbox lookup compares `opera frame` against the `opera-utils disp-s1-frame-bbox` CLI command. For frame intersection and missing-data optimization (which do not share identical CLI flags in `opera-utils`), the Python baseline invokes `python -c` directly against the `opera_utils` API and discards the return value (excluding stdout JSON/text serialization, while `opera` writes full output to stdout; `opera missing-data` passes `--max-options 10000` so both sides compute the exact same number of options).
 
 | Task | `opera` (PyPI shim) | `opera` (native Rust binary) | Python (`opera-utils`) | Speedup (native) |
 | --- | --- | --- | --- | --- |
-| Frame bbox lookup (`frame 11114 --latlon`) | **284.8 ms** | 337.5 ms | 1,150.2 ms | **3.4x** |
-| Intersecting frames over AOI (46,986 frames) | **261.6 ms** | **255.5 ms** | 944.1 ms | **3.7x** |
-| Missing-data optimization (1,276 CSLCs, 27x48) | **33.9 ms** | **11.7 ms** | 3,438.5 ms | **293.9x** |
+| Frame bbox lookup (`frame 11114 --latlon` vs `opera-utils` CLI) | **284.8 ms** | 286.4 ms | 1,195.5 ms | **4.2x** |
+| Intersecting frames over AOI (46,986 frames, vs `python -c`) | **261.6 ms** | **250.9 ms** | 996.8 ms | **4.0x** |
+| Missing-data optimization (1,276 CSLCs, all options, vs `python -c`) | **82.3 ms** | **58.9 ms** | 3,799.5 ms | **64.5x** |
 
 ## 6. Pure-Rust Vector I/O (`terrio`) vs GeoPandas / pyogrio (GDAL)
 
-Writing and reading 500 DISP-S1 frame polygons to/from a local GeoPackage (`.gpkg`):
+Writing and reading 500 DISP-S1 frame polygons to/from a local GeoPackage (`.gpkg`), with 4-coordinate aggregate bounding-box parity verified between `opera_rs.read_aoi_bbox` and `pyogrio.read_bounds` (reduced to `[xmin, ymin, xmax, ymax]` inside the timed callable):
 
 | Task | `opera-rs` (`terrio`, zero GDAL) | Python (GeoPandas / `pyogrio` GDAL) | Speedup |
 | --- | --- | --- | --- |
-| Read AOI bounds from GeoPackage (500 polygons, bounds-only) | **1.9 ms** | **1.9 ms** (`pyogrio.read_bounds`) | **1.0x** (parity) |
-| Read AOI bounds via full GeoDataFrame load (500 polygons) | **1.9 ms** | 3.5 ms (`gpd.read_file().total_bounds`) | **1.8x** |
-| Write 500 frame polygons to GeoPackage (`.gpkg`) | 5.8 ms | **5.3 ms** (`gdf.to_file`) | 0.9x (parity) |
+| Read aggregate AOI bounds from GeoPackage (500 polygons) | **2.3 ms** | **2.2 ms** (`pyogrio.read_bounds` + min/max) | **1.0x** (parity) |
+| Read AOI bounds via full GeoDataFrame load (500 polygons) | **2.3 ms** | 4.0 ms (`gpd.read_file().total_bounds`) | **1.7x** |
+| Write 500 frame polygons to GeoPackage (`.gpkg`) | 6.2 ms | **6.0 ms** (`gdf.to_file`) | **1.0x** (parity) |
 
 ## Key Takeaways
 
-- **Combinatorial & CLI workloads see the biggest gains (19x to 294x):** Pure-Rust subset optimization (`missing-data`) avoids Python object allocation and NumPy per-iteration overhead, running **37x to 59x** faster from Python and **294x** faster via the standalone `opera` CLI. Cold CLI and MCP tool calls also skip Python's ~520 to 850 ms import overhead.
+- **Combinatorial & cold-start workloads see the biggest gains (19x to 263x):** Pure-Rust subset optimization (`missing-data`) avoids Python object allocation and NumPy per-iteration overhead, running **37x to 59x** faster in-process from Python and **64.5x** faster in fresh subprocess runs even when materializing and printing JSON for every valid option (`--max-options 10000`). Cold CLI and MCP tool calls also skip Python's ~520 to 850 ms import overhead.
 - **ZIP/JSON-bound `burst_db` queries are 1.2x to 2.3x faster uncached:** Reading a 3 to 4 MB compressed archive that inflates into tens of megabytes of JSON is largely bound by DEFLATE decompression and JSON parsing, where Rust's `flate2` + `serde_json` still beats Python's `zipfile` + `json` + `shapely` (especially on spatial intersection across all 46,986 polygons: 174 ms vs 406 ms). Note that for repeated in-process Python lookups against the same archive, `opera_utils` caches the parsed dictionary in memory via `@functools.cache`.
-- **GeoPackage I/O matches C GDAL with zero GDAL dependencies:** Through `terrio`, `opera-rs` matches native C `pyogrio.read_bounds` (1.9 ms vs 1.9 ms), runs **1.8x faster** than a full `geopandas.read_file().total_bounds` load (3.5 ms), and writes 500 polygons in **5.8 ms** (matching GDAL's 5.3 ms) while shipping a single 12 MB wheel with zero external dependencies.
+- **GeoPackage I/O matches C GDAL with zero GDAL dependencies:** Through `terrio`, `opera-rs` matches native C `pyogrio.read_bounds` + aggregate extent (2.3 ms vs 2.2 ms), runs **1.7x faster** than a full `geopandas.read_file().total_bounds` load (4.0 ms), and writes 500 polygons in **6.2 ms** (matching GDAL's 6.0 ms) while shipping a single 12 MB wheel with zero external dependencies.

@@ -138,9 +138,9 @@ Measured on Linux x86_64 (Python 3.12, release build) against identical local ca
 | CLI cold start (standalone `opera --help` vs `opera-utils --help`) | **3.2 ms** | 847.5 ms | **263x faster** |
 | `get_dates` x 10,000 CSLC filenames (Python API) | **5.3 ms** | 92.7 ms | **17.5x faster** |
 | `get_missing_data_options` (1,276 CSLCs, 27x48, Python API) | **48.4 ms** | 2,859.7 ms | **59.1x faster** |
-| End-to-end CLI `missing-data` (1,276 CSLCs, native binary) | **11.7 ms** | 3,438.5 ms | **293.9x faster** |
+| End-to-end `missing-data` (1,276 CSLCs, all options, native binary) | **58.9 ms** | 3,799.5 ms (`python -c`) | **64.5x faster** |
 | `get_intersecting_frames` (46,986 frames, zip) | **174.1 ms** | 406.4 ms | **2.3x faster** |
-| Read AOI bounds from GeoPackage (500 polygons) | **1.9 ms** | 1.9 ms (`pyogrio`) / 3.5 ms (`geopandas`) | **1.0x to 1.8x** |
+| Read aggregate AOI bounds from GeoPackage (500 polygons) | **2.3 ms** | 2.2 ms (`pyogrio`) / 4.0 ms (`geopandas`) | **1.0x to 1.7x** |
 
 ## Interactive Notebooks
 

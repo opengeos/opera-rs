@@ -38,7 +38,7 @@ A focused walkthrough of the pure-Rust `opera-utils` integration in `opera-rs` (
 Install `opera-rs` alongside the plotting and notebook dependencies in a Python 3.11+ environment:
 
 ```sh
-pip install opera-rs matplotlib pandas pillow jupyterlab
+pip install "opera-rs>=0.2.0" matplotlib pandas pillow jupyterlab
 git clone https://github.com/opengeos/opera-rs.git
 jupyter lab opera-rs/examples/
 ```

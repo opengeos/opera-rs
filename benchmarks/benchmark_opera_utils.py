@@ -58,12 +58,7 @@ def bench_proc(cmd: list[str], repeats: int = 7, warmup: int = 2) -> float:
 
 def clear_opera_utils_caches() -> None:
     """Clear @functools.cache entries so archive decompression and parsing are measured fairly."""
-    for fn in (
-        burst_frame_db.read_zipped_json,
-        burst_frame_db.get_frame_to_burst_mapping,
-        burst_frame_db.get_burst_to_frame_mapping,
-    ):
-        fn.cache_clear()
+    burst_frame_db.read_zipped_json.cache_clear()
 
 
 def build_cslc_stack(num_dates: int, gaps: dict[int, set[int]]) -> list[str]:
@@ -314,11 +309,23 @@ def main() -> None:
 
             list_txt = Path(td) / "cslc_list.txt"
             list_txt.write_text("\n".join(stack_48) + "\n")
-            rs_cli_md = bench_proc(
-                [args.opera_bin, "missing-data", "--file", str(list_txt), "--json"],
-                heavy_repeats,
-                heavy_warmup,
+            rs_md_cmd = [
+                args.opera_bin,
+                "missing-data",
+                "--file",
+                str(list_txt),
+                "--max-options",
+                "10000",
+                "--json",
+            ]
+            # Verify option-count parity outside the timed loop
+            rs_cli_json = json.loads(
+                subprocess.check_output(rs_md_cmd, text=True)
             )
+            assert len(rs_cli_json["options"]) == len(py_md2_out), (
+                f"option count mismatch: {len(rs_cli_json['options'])} vs {len(py_md2_out)}"
+            )
+            rs_cli_md = bench_proc(rs_md_cmd, heavy_repeats, heavy_warmup)
             py_cli_md = bench_proc(
                 [
                     py_exe,
@@ -350,18 +357,25 @@ def main() -> None:
         )
         record("Vector I/O", f"Write {n_polys} frame polygons to GeoPackage (.gpkg)", rs_w, py_w)
 
-        rs_r, _ = bench(lambda: opera_rs.read_aoi_bbox(gpkg_rs), heavy_repeats, heavy_warmup)
-        py_r_bounds, _ = bench(
-            lambda: pyogrio.read_bounds(gpkg_py, layer="frames"),
-            heavy_repeats,
-            heavy_warmup,
-        )
+        def pyogrio_aggregate_bbox() -> list[float]:
+            _, bounds = pyogrio.read_bounds(gpkg_py, layer="frames")
+            return [
+                float(bounds[0].min()),
+                float(bounds[1].min()),
+                float(bounds[2].max()),
+                float(bounds[3].max()),
+            ]
+
+        rs_r, rs_bbox = bench(lambda: opera_rs.read_aoi_bbox(gpkg_rs), heavy_repeats, heavy_warmup)
+        py_r_bounds, py_bbox = bench(pyogrio_aggregate_bbox, heavy_repeats, heavy_warmup)
+        for a, b in zip(rs_bbox, py_bbox):
+            assert abs(a - b) < 1e-6, f"bbox mismatch: {rs_bbox} vs {py_bbox}"
         py_r_gpd, _ = bench(
             lambda: list(gpd.read_file(gpkg_py).total_bounds),
             heavy_repeats,
             heavy_warmup,
         )
-        record("Vector I/O", f"Read bounds from GeoPackage ({n_polys} polys, pyogrio)", rs_r, py_r_bounds)
+        record("Vector I/O", f"Read AOI bounds from GeoPackage ({n_polys} polys, pyogrio)", rs_r, py_r_bounds)
         record("Vector I/O", f"Read GeoDataFrame total_bounds ({n_polys} polys, gpd)", rs_r, py_r_gpd)
 
     if args.json_out is not None:
