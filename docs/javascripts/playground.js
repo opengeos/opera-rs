@@ -587,41 +587,38 @@
     const tbody = $("op-stats-tbody");
     clearEl(tbody);
 
+    const fgColor = getComputedStyle(document.body).color || "#374151";
+
     if (breakdown.length) {
       const top = breakdown.slice(0, 7);
       const maxPct = Math.max(...top.map((c) => c.percent || 0), 1);
       const rowH = Math.min(28, Math.floor((h - 24) / top.length));
-      const labelW = 148;
-      const barMaxW = w - labelW - 96;
+      const labelW = 156;
+      const barMaxW = w - labelW - 118;
       const palette = ["#0284c7", "#38bdf8", "#0d9488", "#94a3b8", "#f59e0b", "#64748b", "#a855f7"];
 
       top.forEach((cls, idx) => {
         const y = 14 + idx * rowH;
-        ctx.fillStyle = "#4b5563";
+        const pct = Number(cls.percent || 0);
+        const area = Number(cls.area_km2 || 0);
+        const pxCount = Math.round(Number(cls.pixel_count || 0));
+        const name = cls.label || `Class ${cls.class_value}`;
+
+        ctx.fillStyle = fgColor;
         ctx.font = "11px sans-serif";
         ctx.textAlign = "right";
-        const label = (cls.label || `Class ${cls.value}`).slice(0, 22);
-        ctx.fillText(label, labelW - 8, y + 14);
+        ctx.fillText(name.slice(0, 22), labelW - 8, y + 14);
 
-        const bw = Math.max(2, ((cls.percent || 0) / maxPct) * barMaxW);
+        const bw = Math.max(2, (pct / maxPct) * barMaxW);
         ctx.fillStyle = palette[idx % palette.length];
         ctx.fillRect(labelW, y + 3, bw, rowH - 8);
 
-        ctx.fillStyle = "#374151";
+        ctx.fillStyle = fgColor;
         ctx.textAlign = "left";
-        ctx.fillText(
-          `${cls.area_km2.toFixed(1)} km2 (${cls.percent.toFixed(1)}%)`,
-          labelW + bw + 6,
-          y + 14
-        );
+        ctx.fillText(`${area.toFixed(1)} km2 (${pct.toFixed(1)}%)`, labelW + bw + 6, y + 14);
 
         const tr = document.createElement("tr");
-        for (const v of [
-          cls.label || String(cls.value),
-          cls.pixels.toLocaleString(),
-          `${cls.percent.toFixed(2)}%`,
-          cls.area_km2.toFixed(2),
-        ]) {
+        for (const v of [name, pxCount.toLocaleString(), `${pct.toFixed(2)}%`, area.toFixed(2)]) {
           const td = document.createElement("td");
           td.textContent = v;
           tr.appendChild(td);
@@ -639,7 +636,7 @@
         ["Std Dev", bandStats.std],
         ["Valid %", bandStats.valid_percent],
       ].filter(([, v]) => v !== null && v !== undefined);
-      ctx.fillStyle = "#374151";
+      ctx.fillStyle = fgColor;
       ctx.font = "13px monospace";
       rows.forEach(([k, v], idx) => {
         ctx.fillText(`${k.padEnd(10)}: ${Number(v).toFixed(3)}`, 24, 34 + idx * 24);
