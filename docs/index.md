@@ -8,7 +8,7 @@
 
 Pure-Rust, agent-centric toolkit for searching, visualizing, and analyzing [NASA OPERA](https://www.jpl.nasa.gov/go/opera) satellite products (DSWx-HLS, DSWx-S1, DIST-ALERT, DIST-ANN, RTC-S1, CSLC-S1, DISP-S1) via NASA's public CMR API, [`titiler-cmr`](https://github.com/developmentseed/titiler-cmr), and [`terrio`](https://github.com/opengeos/terrio), with **zero GDAL dependencies** (`--no-default-features` has zero C/C++ dependencies) and **no Earthdata login required**.
 
-Try `opera-rs` right now with zero local setup in Google Colab: [Interactive Demo Notebook](https://colab.research.google.com/github/opengeos/opera-rs/blob/main/examples/opera_rs_demo.ipynb) | [Sentinel-1 Bursts & DISP-S1 Notebook](https://colab.research.google.com/github/opengeos/opera-rs/blob/main/examples/opera_utils_demo.ipynb), or browse the [Notebooks](notebooks.md) and [Benchmarks](benchmarks.md) pages.
+Try `opera-rs` right now with zero local setup in the interactive **[Browser Playground](playground.md)** (powered by `opera-rs` WebAssembly + live NASA CMR / `titiler-cmr`), or open Google Colab: [Interactive Demo Notebook](https://colab.research.google.com/github/opengeos/opera-rs/blob/main/examples/opera_rs_demo.ipynb) | [Sentinel-1 Bursts & DISP-S1 Notebook](https://colab.research.google.com/github/opengeos/opera-rs/blob/main/examples/opera_utils_demo.ipynb), or browse the [Notebooks](notebooks.md) and [Benchmarks](benchmarks.md) pages.
 
 ## Key Capabilities
 
