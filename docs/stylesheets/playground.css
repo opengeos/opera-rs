@@ -230,6 +230,38 @@
   overflow: hidden;
 }
 
+/* Prevent Zensical/Material .md-typeset details/summary rules from injecting extra icons into MapLibre attribution */
+#opera-playground .op-map details.maplibregl-ctrl-attrib {
+  margin: 0 10px 10px 0;
+  padding: 0 5px;
+  border: 0;
+  box-shadow: none;
+  font-size: 12px;
+  line-height: 20px;
+  background-color: rgba(255, 255, 255, 0.75);
+  color: #111;
+}
+
+#opera-playground .op-map details.maplibregl-ctrl-attrib.maplibregl-compact {
+  min-height: 20px;
+  padding: 2px 24px 2px 0;
+  border-radius: 12px;
+}
+
+#opera-playground .op-map details.maplibregl-ctrl-attrib summary.maplibregl-ctrl-attrib-button {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  list-style: none;
+}
+
+#opera-playground .op-map details.maplibregl-ctrl-attrib summary.maplibregl-ctrl-attrib-button::before,
+#opera-playground .op-map details.maplibregl-ctrl-attrib summary.maplibregl-ctrl-attrib-button::after,
+#opera-playground .op-map details.maplibregl-ctrl-attrib summary.maplibregl-ctrl-attrib-button::-webkit-details-marker {
+  display: none !important;
+  content: none !important;
+}
+
 #opera-playground .op-legend {
   display: flex;
   flex-wrap: wrap;
