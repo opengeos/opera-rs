@@ -4,7 +4,7 @@ Add `opera-rs` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-opera-rs = "0.1"
+opera-rs = "0.2"
 ```
 
 ## Feature Flags
@@ -19,7 +19,7 @@ Disable default features (`default-features = false`) for 100% pure-Rust, zero-C
 
 ```toml
 [dependencies]
-opera-rs = { version = "0.1", default-features = false }
+opera-rs = { version = "0.2", default-features = false }
 ```
 
 ## Core Modules

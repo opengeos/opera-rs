@@ -2,7 +2,7 @@
 name = "opera-js"
 description = "WebAssembly bindings for opera-rs: NASA OPERA catalog, CMR UMM-G parsing, titiler-cmr URL & statistics analytics, Sentinel-1 burst/DISP-S1 utilities, and missing-data optimization in browsers and Node.js (zero GDAL)"
 publish = false
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.90"

@@ -95,7 +95,7 @@ opera export-html --product dswx-hls --bbox -119.95,35.85,-119.45,36.25 \
 
 ```toml
 [dependencies]
-opera-rs = "0.1"
+opera-rs = "0.2"
 ```
 
 ```rust,no_run
